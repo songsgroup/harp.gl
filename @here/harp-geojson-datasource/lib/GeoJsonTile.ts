@@ -150,8 +150,8 @@ export class GeoJsonTile extends Tile {
 
         if (decodedTile.textPathGeometries !== undefined) {
             this.preparedTextPaths = tileGeometryCreator.prepareTextPaths(
-                this,
-                decodedTile.textPathGeometries
+                decodedTile.textPathGeometries,
+                decodedTile
             );
             for (const textPath of this.preparedTextPaths) {
                 const techniqueIndex = textPath.technique!;

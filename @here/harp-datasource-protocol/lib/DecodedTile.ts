@@ -107,7 +107,7 @@ export interface Geometry {
     vertexAttributes: BufferAttribute[];
     interleavedVertexAttributes?: InterleavedBufferAttribute[];
     index?: BufferAttribute;
-    edgeIndex?: BufferAttribute;
+    edgeIndex?: BufferAttribute | BufferAttribute[];
     groups: Group[];
     uuid?: string;
 
@@ -187,6 +187,11 @@ export interface Group {
      */
     renderOrderOffset?: number;
     featureId?: number;
+
+    /**
+     * Set to `true` if its [[Geometry]] has been created.
+     */
+    created?: boolean;
 }
 
 /**
