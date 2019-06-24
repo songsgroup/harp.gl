@@ -38,6 +38,12 @@ export class FeaturesDataSource extends OmvDataSource {
         this.addTileBackground = false;
     }
 
+    setFromGeojson(geojson: FeatureCollection) {
+        this.m_featureCollection = geojson;
+        this.update();
+        return this;
+    }
+
     /**
      * Adds a custom feature in the datasource.
      *
