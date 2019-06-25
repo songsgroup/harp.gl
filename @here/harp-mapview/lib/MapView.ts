@@ -2052,16 +2052,8 @@ export class MapView extends THREE.EventDispatcher {
             // make sense to max out the accuracy here.
             const kFarOffset = 20000.0;
 
-            let groundDistance = this.projection.groundDistance(this.m_camera.position);
-            if (this.elevationProvider !== undefined) {
-                const heightAboveTerrain = this.elevationProvider.getHeight(this.geoCenter);
-                if (heightAboveTerrain !== undefined) {
-                    groundDistance =
-                        this.projection.unprojectAltitude(this.m_camera.position) -
-                        heightAboveTerrain;
-                }
-            }
-            nearPlane = Math.max(kMinNear, groundDistance * 0.1);
+            const heightAboveGround = this.getHeightAboveTerrain();
+            nearPlane = Math.max(kMinNear, heightAboveGround * 0.1);
             farPlane = nearPlane * kMultiplier + kFarOffset;
 
             if (this.m_options.farPlaneEvaluator !== undefined) {
@@ -2111,13 +2103,25 @@ export class MapView extends THREE.EventDispatcher {
             );
         } else {
             const cameraPitch = MapViewUtils.extractYawPitchRoll(this.m_camera.quaternion).pitch;
-            const cameraPosZ = Math.abs(this.projection.groundDistance(this.m_camera.position));
+            const cameraPosZ = this.getHeightAboveTerrain();
 
             this.m_lookAtDistance = cameraPosZ / Math.cos(cameraPitch);
 
             const zoomLevelDistance = cameraPosZ / Math.cos(Math.min(cameraPitch, Math.PI / 3));
             this.m_zoomLevel = MapViewUtils.calculateZoomLevelFromDistance(zoomLevelDistance, this);
         }
+    }
+
+    private getHeightAboveTerrain(): number {
+        if (this.elevationProvider !== undefined) {
+            const heightAboveTerrain = this.elevationProvider.getHeight(this.geoCenter);
+            if (heightAboveTerrain !== undefined) {
+                const height =
+                    this.projection.unprojectAltitude(this.m_camera.position) - heightAboveTerrain;
+                return Math.max(height, 1);
+            }
+        }
+        return Math.abs(this.projection.groundDistance(this.m_camera.position));
     }
 
     private detectCurrentFps(now: number) {
@@ -2598,7 +2602,9 @@ export class MapView extends THREE.EventDispatcher {
                 if (!light) {
                     logger.log(
                         // tslint:disable-next-line: max-line-length
-                        `MapView: failed to create light ${lightDescription.name} of type ${lightDescription.type}`
+                        `MapView: failed to create light ${lightDescription.name} of type ${
+                            lightDescription.type
+                        }`
                     );
                     return;
                 }
