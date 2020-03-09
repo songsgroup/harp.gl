@@ -44,6 +44,7 @@ export class TilerService extends WorkerService {
      *
      * @param request [[WorkerTilerProtocol]] request.
      * @returns A promise which resolves to a [[WorkerServiceResponse]].
+     * @override
      */
     protected handleRequest(request: any): Promise<WorkerServiceResponse> {
         if (WorkerTilerProtocol.isRegisterIndexRequest(request)) {
@@ -61,7 +62,7 @@ export class TilerService extends WorkerService {
         request: WorkerTilerProtocol.TileRequest
     ): Promise<WorkerServiceResponse> {
         const tileKey = TileKey.fromMortonCode(request.tileKey);
-        const tile = this.tiler.getTile(request.index, tileKey);
+        const tile = await this.tiler.getTile(request.index, tileKey);
 
         return { response: tile || {} };
     }

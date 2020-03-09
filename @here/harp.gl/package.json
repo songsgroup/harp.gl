@@ -1,6 +1,6 @@
 {
     "name": "@here/harp.gl",
-    "version": "0.2.2",
+    "version": "0.13.0",
     "description": "JS Bundle containing all the functionality needed to render a map with harp.gl",
     "keywords": [
         "map",
@@ -20,7 +20,7 @@
     },
     "repository": {
         "type": "git",
-        "url": "git://github.com:heremaps/harp.gl.git"
+        "url": "https://github.com/heremaps/harp.gl.git"
     },
     "author": {
         "name": "HERE Europe B.V.",
@@ -28,24 +28,30 @@
     },
     "license": "Apache-2.0",
     "dependencies": {
-        "three": "^0.105.2"
+        "three": "^0.114.0"
     },
     "devDependencies": {
-        "@here/harp-features-datasource": "^0.1.2",
-        "@here/harp-geojson-datasource": "^0.4.2",
-        "@here/harp-geoutils": "^0.4.1",
-        "@here/harp-lines": "^0.3.1",
-        "@here/harp-lrucache": "^0.2.4",
-        "@here/harp-mapview": "^0.9.2",
-        "@here/harp-materials": "^0.3.1",
-        "@here/harp-omv-datasource": "^0.4.2",
-        "@here/harp-test-utils": "^0.2.4",
-        "@here/harp-text-canvas": "^0.3.1",
-        "@here/harp-utils": "^0.2.5",
+        "@here/harp-datasource-protocol": "^0.13.0",
+        "@here/harp-debug-datasource": "^0.13.0",
+        "@here/harp-features-datasource": "^0.13.0",
+        "@here/harp-geojson-datasource": "^0.13.0",
+        "@here/harp-geoutils": "^0.13.0",
+        "@here/harp-lines": "^0.13.0",
+        "@here/harp-lrucache": "^0.13.0",
+        "@here/harp-map-controls": "^0.13.0",
+        "@here/harp-mapview": "^0.13.0",
+        "@here/harp-mapview-decoder": "^0.13.0",
+        "@here/harp-materials": "^0.13.0",
+        "@here/harp-olp-utils": "^0.13.0",
+        "@here/harp-omv-datasource": "^0.13.0",
+        "@here/harp-test-utils": "^0.13.0",
+        "@here/harp-text-canvas": "^0.13.0",
+        "@here/harp-utils": "^0.13.0",
+        "@here/harp-webtile-datasource": "^0.13.0",
         "ts-loader": "^6.0.3",
-        "typescript": "^3.5.2",
-        "webpack": "^4.34.0",
-        "webpack-cli": "^3.3.4",
+        "typescript": "^3.8.2",
+        "webpack": "^4.42.0",
+        "webpack-cli": "^3.3.11",
         "webpack-merge": "^4.1.1"
     },
     "publishConfig": {

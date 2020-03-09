@@ -16,6 +16,7 @@ import {
     ExtendedTileInfoVisitor,
     ExtendedTileInfoWriter,
     FeatureGroup,
+    FeatureGroupType,
     PolygonFeatureGroup
 } from "../lib/TileInfo";
 
@@ -209,7 +210,11 @@ describe("ExtendedTileInfo", function() {
 
     function createPointInfo(
         index: number
-    ): { technique: IndexedTechnique; storedTechnique: IndexedTechnique; env: MapEnv } {
+    ): {
+        technique: IndexedTechnique;
+        storedTechnique: IndexedTechnique;
+        env: MapEnv;
+    } {
         const technique: IndexedTechnique = {
             name: "squares",
             color: "#F00",
@@ -242,7 +247,11 @@ describe("ExtendedTileInfo", function() {
 
     function createLineInfo(
         index: number
-    ): { technique: IndexedTechnique; storedTechnique: IndexedTechnique; env: MapEnv } {
+    ): {
+        technique: IndexedTechnique;
+        storedTechnique: IndexedTechnique;
+        env: MapEnv;
+    } {
         const technique: IndexedTechnique = {
             name: "line",
             color: "#0F0",
@@ -275,7 +284,11 @@ describe("ExtendedTileInfo", function() {
 
     function createPolygonInfo(
         index: number
-    ): { technique: IndexedTechnique; storedTechnique: IndexedTechnique; env: MapEnv } {
+    ): {
+        technique: IndexedTechnique;
+        storedTechnique: IndexedTechnique;
+        env: MapEnv;
+    } {
         const technique: IndexedTechnique = {
             name: "fill",
             color: "#00f",
@@ -354,11 +367,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.pointGroup,
-            technique,
             env,
             1234,
+            "name",
             techniqueIndex,
-            /* isPolygonGroup */ false
+            FeatureGroupType.Point
         );
 
         writer.addFeaturePoint(tileInfo.pointGroup, 5, 6);
@@ -384,11 +397,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.pointGroup,
-            technique,
             env,
             3456,
+            "point_label-3456",
             techniqueIndex,
-            /* isPolygonGroup */ false
+            FeatureGroupType.Point
         );
 
         writer.addFeaturePoint(tileInfo.pointGroup, 5, 6);
@@ -446,11 +459,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.pointGroup,
-            technique,
             env,
             3456,
+            "point_label-3456",
             techniqueIndex,
-            /* isPolygonGroup */ false
+            FeatureGroupType.Point
         );
 
         writer.addFeaturePoint(tileInfo.pointGroup, 5, 6);
@@ -459,11 +472,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.pointGroup,
-            pointInfo2.technique,
             pointInfo2.env,
             7890,
+            "point_label-7890",
             techniqueIndex2,
-            /* isPolygonGroup */ false
+            FeatureGroupType.Point
         );
 
         writer.addFeaturePoint(tileInfo.pointGroup, 8, 9);
@@ -544,11 +557,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.lineGroup,
-            technique,
             env,
             678,
+            "lineLabel-123",
             techniqueIndex,
-            /* isPolygonGroup */ false
+            FeatureGroupType.Line
         );
 
         writer.addFeaturePoints(tileInfo.lineGroup, [10, 11, 12, 13]);
@@ -601,11 +614,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.lineGroup,
-            technique,
             env,
             678,
+            "lineLabel-123",
             techniqueIndex,
-            /* isPolygonGroup */ false
+            FeatureGroupType.Line
         );
 
         writer.addFeaturePoints(tileInfo.lineGroup, [10, 11, 12, 13]);
@@ -614,11 +627,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.lineGroup,
-            lineInfo2.technique,
             lineInfo2.env,
             7890,
+            "lineLabel-456",
             techniqueIndex2,
-            /* isPolygonGroup */ false
+            FeatureGroupType.Line
         );
 
         writer.addFeaturePoints(tileInfo.lineGroup, [20, 21, 22, 23]);
@@ -689,11 +702,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.polygonGroup,
-            technique,
             env,
             678,
+            "fillLabel-123",
             techniqueIndex,
-            /* isPolygonGroup */ true
+            FeatureGroupType.Polygon
         );
 
         writer.addRingPoints(tileInfo.polygonGroup, [10, 11, 12, 13, 14, 15], true);
@@ -753,11 +766,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.polygonGroup,
-            technique,
             env,
             678,
+            "fillLabel-123",
             techniqueIndex,
-            /* isPolygonGroup */ true
+            FeatureGroupType.Polygon
         );
 
         writer.addRingPoints(tileInfo.polygonGroup, [10, 11, 12, 13, 14, 15], true);
@@ -766,11 +779,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.polygonGroup,
-            polygonInfo2.technique,
             polygonInfo2.env,
             999,
+            "fillLabel-999",
             techniqueIndex2,
-            /* isPolygonGroup */ true
+            FeatureGroupType.Polygon
         );
 
         writer.addRingPoints(tileInfo.polygonGroup, [125, 135, 145, 155, 165, 175, 185, 195], true);
@@ -850,11 +863,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.polygonGroup,
-            technique,
             env,
             678,
+            "fillLabel-123",
             techniqueIndex,
-            /* isPolygonGroup */ true
+            FeatureGroupType.Polygon
         );
 
         writer.addRingPoints(tileInfo.polygonGroup, [10, 11, 12, 13, 14, 15], true);
@@ -864,11 +877,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.polygonGroup,
-            polygonInfo2.technique,
             polygonInfo2.env,
             999,
+            "fillLabel-999",
             techniqueIndex2,
-            /* isPolygonGroup */ true
+            FeatureGroupType.Polygon
         );
 
         writer.addRingPoints(tileInfo.polygonGroup, [125, 135, 145, 155, 165, 175, 185, 195], true);
@@ -950,11 +963,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.polygonGroup,
-            technique,
             env,
             678,
+            "fillLabel-123",
             techniqueIndex,
-            /* isPolygonGroup */ true
+            FeatureGroupType.Polygon
         );
 
         writer.addRingPoints(tileInfo.polygonGroup, [10, 11, 12, 13, 14, 15], true);
@@ -965,11 +978,11 @@ describe("ExtendedTileInfo", function() {
 
         writer.addFeature(
             tileInfo.polygonGroup,
-            polygonInfo2.technique,
             polygonInfo2.env,
             999,
+            "fillLabel-999",
             techniqueIndex2,
-            /* isPolygonGroup */ true
+            FeatureGroupType.Polygon
         );
 
         writer.addRingPoints(tileInfo.polygonGroup, [125, 135, 145, 155, 165, 175, 185, 195], true);

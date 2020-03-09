@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Copyright (C) 2017-2020 HERE Europe B.V.
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -9,28 +9,43 @@ import {
     Technique,
     TextPathGeometry
 } from "@here/harp-datasource-protocol";
-import { GeoBox, Projection, TileKey } from "@here/harp-geoutils";
-import { CachedResource, GroupedPriorityList } from "@here/harp-utils";
+import { GeoBox, OrientedBox3, Projection, TileKey } from "@here/harp-geoutils";
+import { assert, CachedResource, LoggerManager } from "@here/harp-utils";
 import * as THREE from "three";
-
 import { AnimatedExtrusionTileHandler } from "./AnimatedExtrusionHandler";
-import { CopyrightInfo } from "./CopyrightInfo";
+import { CopyrightInfo } from "./copyrights/CopyrightInfo";
 import { DataSource } from "./DataSource";
+import { LodMesh } from "./geometry/LodMesh";
 import { TileGeometryLoader } from "./geometry/TileGeometryLoader";
 import { MapView } from "./MapView";
+import { PathBlockingElement } from "./PathBlockingElement";
 import { PerformanceStatistics } from "./Statistics";
 import { TextElement } from "./text/TextElement";
+import { TextElementGroup } from "./text/TextElementGroup";
+import { TextElementGroupPriorityList } from "./text/TextElementGroupPriorityList";
+import { TileTextStyleCache } from "./text/TileTextStyleCache";
 import { MapViewUtils } from "./Utils";
+
+const logger = LoggerManager.instance.create("Tile");
 
 export type TileObject = THREE.Object3D & {
     /**
      * Distance of this object from the [[Tile]]'s center.
      */
     displacement?: THREE.Vector3;
+
+    /**
+     * This stores the THREE.Object3D renderOrder property, we need to back it up because we need to
+     * reduce it if the tile is used as fall back. When it is used normally, the renderOrder needs
+     * to be reset.
+     * @hidden
+     */
+    _backupRenderOrder?: number;
 };
 
 interface DisposableObject {
     geometry?: THREE.BufferGeometry | THREE.Geometry;
+    geometries?: Array<THREE.BufferGeometry | THREE.Geometry>;
     material?: THREE.Material[] | THREE.Material;
 }
 
@@ -43,11 +58,6 @@ export interface TileFeatureData {
      * The original type of geometry.
      */
     geometryType?: GeometryType;
-
-    /**
-     * An optional array of feature IDs.
-     */
-    ids?: Array<number | undefined>;
 
     /**
      * An optional array of indices into geometry where the feature starts. The lists of IDs
@@ -69,22 +79,11 @@ const MINIMUM_SMALL_OBJECT_SIZE_ESTIMATION = 16;
 const MINIMUM_OBJECT_SIZE_ESTIMATION = 100;
 
 /**
- * A default empty [[DecodedTile]], for tiles that must be rendered but do not have any objects.
- */
-const defaultEmptyDecodedTile: DecodedTile = {
-    techniques: [],
-    geometries: []
-};
-
-/**
  * Compute the memory footprint of `TileFeatureData`.
  */
 export function getFeatureDataSize(featureData: TileFeatureData): number {
     let numBytes = MINIMUM_OBJECT_SIZE_ESTIMATION;
 
-    if (featureData.ids !== undefined) {
-        numBytes += featureData.ids.length * 8;
-    }
     if (featureData.starts !== undefined) {
         numBytes += featureData.starts.length * 8;
     }
@@ -123,7 +122,7 @@ export interface RoadIntersectionData {
     /**
      * An array of widths of the roads. The lists of IDs and widths have the same size.
      */
-    widths: number[];
+    widths: Array<number | (() => number)>;
 
     /**
      * An array of 2D numbers that make up the road geometry.
@@ -249,9 +248,15 @@ export interface TileResourceInfo {
      */
     numTextElements: number;
     /**
+     * @deprecated This counter has been merged with numTextElements.
      * Number of user [[TextElement]]s in this tile.
      */
     numUserTextElements: number;
+}
+
+export interface TextElementIndex {
+    groupIndex: number;
+    elementIndex: number;
 }
 
 /**
@@ -277,12 +282,12 @@ export class Tile implements CachedResource {
     /**
      * The bounding box of this `Tile` in world coordinates.
      */
-    readonly boundingBox: THREE.Box3 = new THREE.Box3();
+    readonly boundingBox = new OrientedBox3();
 
     /**
-     * The center of this `Tile` in world coordinates.
+     * Maximum height of geometry on this tile above ground level.
      */
-    readonly center: THREE.Vector3 = new THREE.Vector3();
+    maxGeometryHeight: number = 0;
 
     /**
      * A record of road data that cannot be intersected with THREE.JS, because the geometry is
@@ -321,13 +326,40 @@ export class Tile implements CachedResource {
     numFramesVisible: number = 0;
 
     /**
+     * Version stamp of the visibility set in the [[TileManager]]. If the counter is different, the
+     * visibility of the Tile's objects has to be calculated. Optimization to reduce overhead of
+     * computing visibility.
+     */
+    visibilityCounter: number = -1;
+
+    /**
+     * @hidden
+     *
+     * Used to tell if the Tile is used temporarily as a fallback tile.
+     *
+     * levelOffset is in in the range [-quadTreeSearchDistanceUp,
+     * quadTreeSearchDistanceDown], where these values come from the
+     * [[VisibleTileSetOptions]]
+     */
+    levelOffset: number = 0;
+
+    /**
+     * If the tile should not be rendered, this is used typically when the tile in question
+     * is completely covered by another tile and therefore can be skipped without any visual
+     * impact. Setting this value directly affects the [[willRender]] method, unless
+     * overriden by deriving classes.
+     */
+    skipRendering = false;
+
+    /**
      * @hidden
      *
      * Prepared text geometries optimized for display.
      */
-    preparedTextPaths: TextPathGeometry[] | undefined;
+    protected preparedTextPaths: TextPathGeometry[] | undefined;
 
     private m_disposed: boolean = false;
+    private m_localTangentSpace = false;
 
     private m_forceHasGeometry: boolean | undefined = undefined;
 
@@ -335,24 +367,20 @@ export class Tile implements CachedResource {
     private m_decodedTile?: DecodedTile;
     private m_tileGeometryLoader?: TileGeometryLoader;
 
-    // Used for [[TextElement]]s which the developer defines.
-    private readonly m_userTextElements: TextElement[] = [];
-
     // Used for [[TextElement]]s that are stored in the data, and that are placed explicitly,
     // fading in and out.
-    private readonly m_textElementGroups: GroupedPriorityList<
-        TextElement
-    > = new GroupedPriorityList<TextElement>();
+    private m_textElementGroups = new TextElementGroupPriorityList();
 
-    // All visible [[TextElement]]s.
-    private readonly m_placedTextElements: GroupedPriorityList<
-        TextElement
-    > = new GroupedPriorityList<TextElement>();
+    // Blocks other labels from showing.
+    private readonly m_pathBlockingElements: PathBlockingElement[] = [];
 
-    // If `true`, the text content of the [[Tile]] changed.
-    private m_textElementsChanged: boolean = false;
+    // If `true`, the text content of the [[Tile]] changed after the last time it was rendered.
+    // It's `Undefined` when no text content has been added yet.
+    private m_textElementsChanged: boolean | undefined;
 
     private m_visibleArea: number = 0;
+    private m_minElevation: number = 0;
+    private m_maxElevation: number = 0;
 
     private m_resourceInfo: TileResourceInfo | undefined;
 
@@ -361,6 +389,7 @@ export class Tile implements CachedResource {
 
     private m_animatedExtrusionTileHandler: AnimatedExtrusionTileHandler | undefined;
 
+    private m_textStyleCache: TileTextStyleCache;
     /**
      * Creates a new [[Tile]].
      *
@@ -369,15 +398,18 @@ export class Tile implements CachedResource {
      * supported, because of the use of the upper bits for the offset.
      * @param offset The optional offset, this is an integer which represents what multiple of 360
      * degrees to shift, only useful for flat projections, hence optional.
+     * @param localTangentSpace Whether the tile geometry is in local tangent space or not.
      */
     constructor(
         readonly dataSource: DataSource,
         readonly tileKey: TileKey,
-        public offset: number = 0
+        public offset: number = 0,
+        localTangentSpace?: boolean
     ) {
         this.geoBox = this.dataSource.getTilingScheme().getGeoBox(this.tileKey);
         this.projection.projectBox(this.geoBox, this.boundingBox);
-        this.boundingBox.getCenter(this.center);
+        this.m_localTangentSpace = localTangentSpace !== undefined ? localTangentSpace : false;
+        this.m_textStyleCache = new TileTextStyleCache(this);
     }
 
     /**
@@ -410,11 +442,13 @@ export class Tile implements CachedResource {
     }
 
     /**
-     * Get the currently visible [[TextElement]]s of this `Tile`. This list is continuously
-     * modified, and is not designed to be used to store developer-defined [[TextElements]].
+     * Whether the data of this tile is in local tangent space or not.
+     * If the data is in local tangent space (i.e. up vector is (0,0,1) for high zoomlevels) then
+     * [[MapView]] will rotate the objects before rendering using the rotation matrix of the
+     * oriented [[boundingBox]].
      */
-    get placedTextElements(): GroupedPriorityList<TextElement> {
-        return this.m_placedTextElements;
+    get localTangentSpace(): boolean {
+        return this.m_localTangentSpace;
     }
 
     /*
@@ -425,6 +459,13 @@ export class Tile implements CachedResource {
             this.computeResourceInfo();
         }
         return this.m_resourceInfo!.heapSize;
+    }
+
+    /**
+     * The center of this `Tile` in world coordinates.
+     */
+    get center(): THREE.Vector3 {
+        return this.boundingBox.position;
     }
 
     /**
@@ -458,38 +499,45 @@ export class Tile implements CachedResource {
     }
 
     /**
+     * @internal
+     * @deprecated
+     *
      * Gets the list of developer-defined [[TextElement]] in this `Tile`. This list is always
      * rendered first.
      */
-    get userTextElements(): TextElement[] {
-        return this.m_userTextElements;
+    get userTextElements(): TextElementGroup {
+        let group = this.m_textElementGroups.groups.get(TextElement.HIGHEST_PRIORITY);
+        if (group === undefined) {
+            group = new TextElementGroup(TextElement.HIGHEST_PRIORITY);
+            this.m_textElementGroups.groups.set(group.priority, group);
+        }
+        return group;
     }
 
     /**
      * Adds a developer-defined [[TextElement]] to this `Tile`. The [[TextElement]] is always
      * visible, if it's in the map's currently visible area.
      *
+     * @deprecated use [[addTextElement]].
+     *
      * @param textElement The Text element to add.
      */
     addUserTextElement(textElement: TextElement) {
-        this.m_userTextElements.push(textElement);
-        this.textElementsChanged = true;
+        textElement.priority = TextElement.HIGHEST_PRIORITY;
+        this.addTextElement(textElement);
     }
 
     /**
      * Removes a developer-defined [[TextElement]] from this `Tile`.
      *
+     * @deprecated use [[removeTextElement]].
+     *
      * @param textElement A developer-defined TextElement to remove.
      * @returns `true` if the element has been removed successfully; `false` otherwise.
      */
     removeUserTextElement(textElement: TextElement): boolean {
-        const foundIndex = this.m_userTextElements.indexOf(textElement);
-        if (foundIndex >= 0) {
-            this.m_userTextElements.splice(foundIndex, 1);
-            this.textElementsChanged = true;
-            return true;
-        }
-        return false;
+        textElement.priority = TextElement.HIGHEST_PRIORITY;
+        return this.removeTextElement(textElement);
     }
 
     /**
@@ -498,14 +546,31 @@ export class Tile implements CachedResource {
      * controls if or when it becomes visible.
      *
      * To ensure that a TextElement is visible, use a high value for its priority, such as
-     * `Number.MAX_SAFE_INTEGER`. Since the number of visible TextElements is limited by the
+     * `TextElement.HIGHEST_PRIORITY`. Since the number of visible TextElements is limited by the
      * screen space, not all TextElements are visible at all times.
      *
      * @param textElement The TextElement to add.
      */
     addTextElement(textElement: TextElement) {
         this.textElementGroups.add(textElement);
+
+        if (this.m_textElementsChanged === false) {
+            // HARP-8733: Clone all groups so that they are handled as new element groups
+            // by TextElementsRenderer and it doesn't try to reuse the same state stored
+            // for the old groups.
+            this.m_textElementGroups = this.textElementGroups.clone();
+        }
         this.textElementsChanged = true;
+    }
+
+    /**
+     * Adds a [[PathBlockingElement]] to this `Tile`. This path has the highest priority and blocks
+     * all other labels. There maybe in future a use case to give it a priority, but as that isn't
+     * yet required, it is left to be implemented later if required.
+     * @param blockingElement Element which should block all other labels.
+     */
+    addBlockingElement(blockingElement: PathBlockingElement) {
+        this.m_pathBlockingElements.push(blockingElement);
     }
 
     /**
@@ -516,18 +581,27 @@ export class Tile implements CachedResource {
      * @returns `true` if the TextElement has been removed successfully; `false` otherwise.
      */
     removeTextElement(textElement: TextElement): boolean {
-        if (this.textElementGroups.remove(textElement)) {
-            this.textElementsChanged = true;
-            return true;
+        const groups = this.textElementGroups;
+        if (!groups.remove(textElement)) {
+            return false;
         }
-        return false;
+        if (this.m_textElementsChanged === false) {
+            // HARP-8733: Clone all groups so that they are handled as new element groups
+            // by TextElementsRenderer and it doesn't try to reuse the same state stored
+            // for the old groups.
+            this.m_textElementGroups = groups.clone();
+        }
+        this.textElementsChanged = true;
+        return true;
     }
 
     /**
+     * @internal
+     *
      * Gets the current [[GroupedPriorityList]] which contains a list of all [[TextElement]]s to be
      * selected and placed for rendering.
      */
-    get textElementGroups(): GroupedPriorityList<TextElement> {
+    get textElementGroups(): TextElementGroupPriorityList {
         return this.m_textElementGroups;
     }
 
@@ -536,11 +610,25 @@ export class Tile implements CachedResource {
      * value is `true` the TextElement is placed for rendering during the next frame.
      */
     get textElementsChanged(): boolean {
-        return this.m_textElementsChanged;
+        return this.m_textElementsChanged ?? false;
     }
 
     set textElementsChanged(changed: boolean) {
         this.m_textElementsChanged = changed;
+    }
+
+    /**
+     * Returns true if the `Tile` has any text elements to render.
+     */
+    hasTextElements(): boolean {
+        return this.m_textElementGroups.count() > 0;
+    }
+
+    /**
+     * Get the current blocking elements.
+     */
+    get blockingElements(): PathBlockingElement[] {
+        return this.m_pathBlockingElements;
     }
 
     /**
@@ -564,10 +652,11 @@ export class Tile implements CachedResource {
      * Called before [[MapView]] starts rendering this `Tile`.
      *
      * @param zoomLevel The current zoom level.
-     * @returns Returns `true` if this `Tile` should be rendered.
+     * @returns Returns `true` if this `Tile` should be rendered. Influenced directly by the
+     * [[skipRendering]] property unless specifically overriden in deriving classes.
      */
     willRender(_zoomLevel: number): boolean {
-        return true;
+        return !this.skipRendering;
     }
 
     /**
@@ -592,6 +681,30 @@ export class Tile implements CachedResource {
     }
 
     /**
+     * Estimated tile's minimum elevation above the sea level.
+     * @note Negative values indicates depressions.
+     */
+    get minElevation(): number {
+        return this.m_minElevation;
+    }
+
+    set minElevation(elevation: number) {
+        this.m_minElevation = elevation;
+    }
+
+    /**
+     * Estimated maximum ground elevation above the sea level that may be found on tile.
+     * @note Negative values indicates depressions.
+     */
+    get maxElevation(): number {
+        return this.m_maxElevation;
+    }
+
+    set maxElevation(elevation: number) {
+        this.m_maxElevation = elevation;
+    }
+
+    /**
      * Gets the decoded tile; it is removed after geometry handling.
      */
     get decodedTile(): DecodedTile | undefined {
@@ -599,18 +712,40 @@ export class Tile implements CachedResource {
     }
 
     /**
-     * Called by [[TileLoader]] when data for geometry is available.
-     *
-     * @param decodedTile
+     * Applies the decoded tile to the tile.
+     * If the geometry is empty, then the tile's forceHasGeometry flag is set.
+     * Map is updated.
+     * @param decodedTile The decoded tile to set.
      */
-    setDecodedTile(decodedTile: DecodedTile) {
+    set decodedTile(decodedTile: DecodedTile | undefined) {
         this.m_decodedTile = decodedTile;
         this.invalidateResourceInfo();
+
+        if (decodedTile === undefined) {
+            return;
+        }
+
+        if (decodedTile.geometries.length === 0) {
+            this.forceHasGeometry(true);
+        }
+
+        if (decodedTile.boundingBox !== undefined) {
+            // If the decoder provides a more accurate bounding box than the one we computed from
+            // the flat geo box we take it instead.
+            this.boundingBox.copy(decodedTile.boundingBox);
+        }
 
         const stats = PerformanceStatistics.instance;
         if (stats.enabled && decodedTile.decodeTime !== undefined) {
             stats.currentFrame.addValue("decode.decodingTime", decodedTile.decodeTime);
+            stats.currentFrame.addValue("decode.decodedTiles", 1);
         }
+
+        if (decodedTile.copyrightHolderIds !== undefined) {
+            this.copyrightInfo = decodedTile.copyrightHolderIds.map(id => ({ id }));
+        }
+
+        this.dataSource.requestUpdate();
     }
 
     /**
@@ -619,6 +754,14 @@ export class Tile implements CachedResource {
     removeDecodedTile() {
         this.m_decodedTile = undefined;
         this.invalidateResourceInfo();
+    }
+
+    /**
+     * Called by the [[TileLoader]] after the `Tile` has finished loading its map data. Can be used
+     * to add content to the `Tile`. The [[DecodedTile]] should still be available.
+     */
+    loadingFinished() {
+        // To be used in subclasses.
     }
 
     /**
@@ -713,15 +856,20 @@ export class Tile implements CachedResource {
     }
 
     /**
-     * Overrides the default value for [[hasGeometry]].
+     * Overrides the default value for [[hasGeometry]] if value is not `undefined`.
      *
      * @param value A new value for the [[hasGeometry]] flag.
      */
-    forceHasGeometry(value: boolean) {
-        if (value) {
-            this.setDecodedTile(defaultEmptyDecodedTile);
-        }
+    forceHasGeometry(value: boolean | undefined) {
         this.m_forceHasGeometry = value;
+    }
+
+    /**
+     * Reset the visibility counter. This will force the visibility check to be rerun on all objects
+     * in this `Tile`.
+     */
+    resetVisibilityCounter(): void {
+        this.visibilityCounter = -1;
     }
 
     /**
@@ -741,10 +889,29 @@ export class Tile implements CachedResource {
     }
 
     /**
-     * Forces the update of this `Tile` geometry.
+     * Loads this `Tile` geometry.
      */
-    reload() {
-        this.dataSource.updateTile(this);
+    load() {
+        const tileLoader = this.tileLoader;
+        if (tileLoader === undefined) {
+            return;
+        }
+
+        tileLoader
+            .loadAndDecode()
+            .then(tileLoaderState => {
+                assert(tileLoaderState === TileLoaderState.Ready);
+                const decodedTile = tileLoader.decodedTile;
+                this.decodedTile = decodedTile;
+            })
+            .catch(tileLoaderState => {
+                if (
+                    tileLoaderState !== TileLoaderState.Canceled &&
+                    tileLoaderState !== TileLoaderState.Failed
+                ) {
+                    logger.error("Unknown error" + tileLoaderState);
+                }
+            });
     }
 
     /**
@@ -756,6 +923,14 @@ export class Tile implements CachedResource {
 
     set animatedExtrusionTileHandler(handler: AnimatedExtrusionTileHandler | undefined) {
         this.m_animatedExtrusionTileHandler = handler;
+    }
+
+    /**
+     * Text style cache for this tile.
+     * @hidden
+     */
+    get textStyleCache(): TileTextStyleCache {
+        return this.m_textStyleCache;
     }
 
     /**
@@ -781,8 +956,16 @@ export class Tile implements CachedResource {
         };
 
         const disposeObject = (object: TileObject & DisposableObject) => {
-            if (object.geometry !== undefined && this.shouldDisposeObjectGeometry(object)) {
-                object.geometry.dispose();
+            if (this.shouldDisposeObjectGeometry(object)) {
+                if (object.geometry !== undefined) {
+                    object.geometry.dispose();
+                }
+
+                if (object.geometries !== undefined) {
+                    for (const geometry of object.geometries) {
+                        geometry.dispose();
+                    }
+                }
             }
 
             if (object.material !== undefined && this.shouldDisposeObjectMaterial(object)) {
@@ -815,10 +998,21 @@ export class Tile implements CachedResource {
             this.m_animatedExtrusionTileHandler.dispose();
         }
 
-        this.placedTextElements.clear();
-        this.textElementGroups.clear();
-        this.userTextElements.length = 0;
+        this.m_textStyleCache.clear();
+        this.clearTextElements();
         this.invalidateResourceInfo();
+    }
+
+    /**
+     * Removes all [[TextElement]] from the tile.
+     */
+    clearTextElements() {
+        if (!this.hasTextElements()) {
+            return;
+        }
+        this.textElementsChanged = true;
+        this.m_pathBlockingElements.splice(0);
+        this.textElementGroups.clear();
     }
 
     /**
@@ -837,17 +1031,36 @@ export class Tile implements CachedResource {
             this.m_tileGeometryLoader = undefined;
         }
         this.clear();
-        this.userTextElements.length = 0;
         this.m_disposed = true;
         // Ensure that tile is removable from tile cache.
         this.frameNumLastRequested = 0;
+    }
+
+    /**
+     * Computes the offset in the x world coordinates corresponding to this tile, based on
+     * its [[offset]].
+     * @returns The x offset.
+     */
+    computeWorldOffsetX(): number {
+        return this.projection.worldExtent(0, 0).max.x * this.offset;
+    }
+
+    /**
+     * Update tile for current map view zoom level
+     * @param zoomLevel Zoom level of the map view
+     */
+    update(zoomLevel: number): void {
+        for (const object of this.objects) {
+            if (object instanceof LodMesh) {
+                object.setLevelOfDetail(zoomLevel - this.tileKey.level);
+            }
+        }
     }
 
     private computeResourceInfo(): void {
         let heapSize = 0;
         let num3dObjects = 0;
         let numTextElements = 0;
-        let numUserTextElements = 0;
 
         const aggregatedObjSize = {
             heapSize: 0,
@@ -868,12 +1081,10 @@ export class Tile implements CachedResource {
         for (const group of this.textElementGroups.groups) {
             numTextElements += group[1].elements.length;
         }
-        numUserTextElements = this.userTextElements.length;
-
         // 216 was the shallow size of a single TextElement last time it has been checked, 312 bytes
         // was the minimum retained size of a TextElement that was not being rendered. If a
         // TextElement is actually rendered, the size may be _much_ bigger.
-        heapSize += (numTextElements + numUserTextElements) * 312;
+        heapSize += numTextElements * 312;
 
         if (this.m_decodedTile !== undefined && this.m_decodedTile.tileInfo !== undefined) {
             aggregatedObjSize.heapSize += this.m_decodedTile.tileInfo.numBytes;
@@ -888,7 +1099,7 @@ export class Tile implements CachedResource {
             gpuSize: aggregatedObjSize.gpuSize,
             num3dObjects,
             numTextElements,
-            numUserTextElements
+            numUserTextElements: 0
         };
     }
 }

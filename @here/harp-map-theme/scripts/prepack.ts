@@ -9,7 +9,7 @@ import * as path from "path";
 
 // tslint:disable:no-console
 
-function onCopyError(err: Error) {
+function onCopyError(err: Error[] | null) {
     if (err === null) {
         return;
     }
@@ -18,6 +18,6 @@ function onCopyError(err: Error) {
     process.exitCode = 1;
 }
 
-const fontDir = path.dirname(require.resolve("@here/harp-font-resources/package.json"));
+const fontDir = path.dirname(require.resolve("@here/harp-fontcatalog/package.json"));
 
 ncp(path.join(fontDir, "resources"), path.join(__dirname, "..", "resources", "fonts"), onCopyError);

@@ -3,9 +3,10 @@
 To begin with `harp.gl`, we provide a few starting points:
 
 - [Import harp.gl with simple bundle](#simple)
-- [Create simple app](#yeoman) using Yeoman
+- [Create simple app](#npm) using npm
 - [Integrate `harp.gl` into your existing Webpack based project](#integrate)
 - [Look at examples](#examples)
+- [Don't forget the credentials](#credentials)
 
 ## <a name="simple"></a> Import harp.gl with simple bundle
 
@@ -14,14 +15,14 @@ Add `three.js` and `harp.gl` to your html and create a canvas with an id `map`:
 <html>
    <head>
       <style>
-         body, html { border: 0; margin: 0; padding: 0 }
+         body, html { border: 0; margin: 0; padding: 0; }
          #map { height: 100vh; width: 100vw; }
       </style>
       <script src="https://unpkg.com/three/build/three.min.js"></script>
       <script src="https://unpkg.com/@here/harp.gl/dist/harp.js"></script>
    </head>
    <body>
-      <canvas id="map"></div>
+      <canvas id="map"></canvas>
       <script src="index.js"></script>
    </body>
 </html>
@@ -29,29 +30,40 @@ Add `three.js` and `harp.gl` to your html and create a canvas with an id `map`:
 Initialize the map:
 ```javascript
 const map = new harp.MapView({
-   canvas: document.getElementById('map'),
+   canvas: document.getElementById("map"),
    theme: "https://unpkg.com/@here/harp-map-theme@latest/resources/berlin_tilezen_night_reduced.json",
+   target: new harp.GeoCoordinates(37.773972, -122.431297), //San Francisco,
+   zoomLevel: 13
 });
-const mapControls = new harp.MapControls(map);
+const controls = new harp.MapControls(map);
+
+window.onresize = () => map.resize(window.innerWidth, window.innerHeight);
+
 const omvDataSource = new harp.OmvDataSource({
-   baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
+   baseUrl: "https://vector.hereapi.com/v2/vectortiles/base/mc",
    apiFormat: harp.APIFormat.XYZOMV,
    styleSetName: "tilezen",
-   authenticationCode: 'YOUR-XYZ-TOKEN',
+   authenticationCode: "YOUR-APIKEY",
+   authenticationMethod: {
+         method: harp.AuthenticationMethod.QueryString,
+         name: "apikey"
+   }
 });
 map.addDataSource(omvDataSource);
 ```
 
+You need to [obtain an apikey](#credentials) to replace `YOUR-APIKEY` and use the service to download vector tiles.
+
 For more information on the simple bundle, please visit the [@here/harp.gl module](../@here/harp.gl) directory.
 
-## <a name="yeoman"></a> Create Typescript app using Yeoman
+For an in depth tutorial on getting started with harp.gl, please visit the [HERE Developer portal](https://developer.here.com/tutorials/harpgl/).
 
-You can create simple `harp.gl` app using Yeomans generator [`@here/generator-harp.gl`](https://github.com/heremaps/harp.gl/tree/master/%40here/generator-harp.gl):
+## <a name="npm"></a> Create Typescript app using `npm`
+
+You can create simple `harp.gl` app using the package initializer [`@here/create-harp.gl-app`](https://github.com/heremaps/harp.gl/tree/master/%40here/create-harp.gl-app):
 
 ```shell
-mkdir 3dmap-example
-cd 3dmap-example
-npx -p yo -p @here/generator-harp.gl yo @here/harp.gl
+npm init @here/harp.gl-app
 ```
 
 ## <a name="integrate"></a> Integrate `harp.gl` into your existing Webpack based project
@@ -66,7 +78,7 @@ format require us to use some javascript code bundler - this example will facili
 Install them into your project:
 
 ```shell
-npm install --save @here/harp-mapview @here/harp-omv-datasource @here/harp-map-theme three@0.104
+npm install --save @here/harp-mapview @here/harp-omv-datasource @here/harp-map-theme
 ```
 
 You have installed 3 key components needed to render basic map:
@@ -75,33 +87,21 @@ You have installed 3 key components needed to render basic map:
 -   `@here/harp-omv-datasource` - tile provider based on OMV/MVT vector tile format
 -   `@here/harp-map-theme` - default theme and font resources required to render map in OMV/tilezen
     scheme
--   `three` - Three.js - a mandatory dependency of `harp.gl`
+
+Since Three.js is a peer dependency of harp.gl it has to be installed as well. To get the version
+that you should install you can use npm view.
+
+```shell
+THREE=`npm view @here/harp-mapview peerDependencies.three`
+npm install --save three@$THREE
+```
 
 ### Decoder bundle
 
 Our example will decode OMV/MVT tiles in Web Workers, so we can achieve high performance because creating geometry from vector tiles is CPU intensive. For this, we need to create separate bundle with code that will run in Web Workers dedicated to
 decoding.
 
-You need to add this config to your Webpack config:
-
-```javascript
-const appConfig = {
-    // your app config
-};
-const harpGlDecodersConfig = {
-    target: "webworker",
-    entry: {
-        decoder: "./harp-gl-decoders.js"
-    },
-    output: {
-        filename: "harp-gl-decoders.bundle.js"
-    },
-    mode: process.env.NODE_ENV || "development"
-};
-return [appConfig, harpGlDecodersConfig];
-```
-
-The `./harp-gl-decoders.js` needs to initialize decoding service:
+Create a file named `./harp-gl-decoders.js` to initialize the decoding service:
 
 ```javascript
 import { OmvTileDecoderService } from "@here/harp-omv-datasource/index-worker";
@@ -125,6 +125,29 @@ OmvTileDecoderService.start();
     }
 </style>
 ```
+
+### Webpack configuration
+
+Install the webpack utilities into your project:
+
+```shell
+npm install --save-dev @here/harp-webpack-utils
+```
+
+Add the following lines to your `webpack.config.js`:
+
+```javascript
+const { addHarpWebpackConfig } = require("@here/harp-webpack-utils/scripts/HarpWebpackConfig");
+const myConfig = {};
+module.exports = addHarpWebpackConfig(
+    myConfig,
+    { mainEntry: "./index.js", decoderEntry: "./harp-gl-decoders.js", htmlTemplate: "./index.html" }
+);
+```
+`myConfig` is your existing Webpack configuration. Configuration values in `myConfig` will override any values generated by `addHarpWebpackConfig`.
+`./index.js` is the path to your main application code. Will be used as the entry point for the main application bundle. May be omitted if Webpack `entry` configuration is included in `myConfig`.
+`./harp-gl-decoders.js` is the path to your decoder service. Will be used as the entry point for the web worker decoder bundle. If omitted no decoder bundle will be created.
+`./index.html` is the path to your HTML template index page. May be omitted if HTML configuration is included in `myConfig`.
 
 ### MapView
 
@@ -169,19 +192,19 @@ to our `MapView` instance:
 import { APIFormat, AuthenticationTypeMapboxV4, OmvDataSource } from "@here/harp-omv-datasource";
 
 const dataSource = new OmvDataSource({
-    baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
-    apiFormat: APIFormat.XYZOMV,
-    styleSetName: "tilezen",
-    maxZoomLevel: 17,
-    authenticationCode: "your access token for xyz service",
-    authenticationMethod: AuthenticationTypeMapboxV4
+   baseUrl: "https://vector.hereapi.com/v2/vectortiles/base/mc",
+   apiFormat: harp.APIFormat.XYZOMV,
+   styleSetName: "tilezen",
+   authenticationCode: "YOUR-APIKEY",
+   authenticationMethod: {
+         method: harp.AuthenticationMethod.QueryString,
+         name: "apikey"
+   }
 });
 mapView.addDataSource(dataSource);
 ```
 
-Note, that this example uses vector tiles downloaded from HERE XYZ service and access to these
-files is protected by access token. You should replace `your access token for xyz service` with real
-one, see [HERE Credentials](#credentials) section below.
+You need to [obtain an apikey](#credentials) to replace `YOUR-APIKEY` and use the service to download vector tiles.
 
 ### Enable user interaction with map
 
@@ -203,19 +226,16 @@ the [examples package](../@here/harp-examples/README.md)
 
 ## <a name="credentials"></a> HERE Credentials
 
-In order to use some of the HERE Services, such as XYZ or Map Tile API, you would need to register
+In order to use some of the HERE Services, you would need to register
 and generate credentials.
 
-First, you need to become a [HERE Developer](https://www.here.xyz/getting-started/).
+First, you need to become a [HERE Developer](https://developer.here.com/).
 
-Afterwards, depending on which service do you want, you might need different credentials.
+Afterwards, please read the [Authentication and Authorization Guide](https://developer.here.com/documentation/authentication/dev_guide/index.html).
 
-For Map Tile API, which is needed for the webtile examples, you need to generate a pair of `app_id`
-and `app_code`, that you can do directly from your Developer Dashboard, see a step-by-step guide
-[here](https://www.here.xyz/getting-started/).
+For [Map Tile API](https://developer.here.com/documentation/map-tile/dev_guide/topics/quick-start-map-tile.html), which is needed for the webtile examples, you need to generate an `apikey`.
 
-For XYZ Vector Tiles, you need an `access_token` that you can generate yourself from the
-[Token Manager](https://xyz.api.here.com/token-ui/).
+For [Vector Tiles](https://developer.here.com/documentation/vector-tiles-api/dev_guide/index.html), you need to generate an `apikey`.
 
 These credentials need to be passed to the Service in order to retrieve tiles, please see the
 examples to check how it is done.

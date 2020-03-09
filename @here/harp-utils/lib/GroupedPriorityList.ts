@@ -32,6 +32,20 @@ export class PriorityListGroup<T extends PriorityListElement> {
     clone(): PriorityListGroup<T> {
         return new PriorityListGroup<T>(this.priority, this.elements.slice());
     }
+
+    /**
+     * Removes an element from the group.
+     * @param element The element to remove.
+     * @returns true if the element was removed, false if it was not found in the group.
+     */
+    remove(element: T): boolean {
+        const foundIndex = this.elements.indexOf(element);
+        if (foundIndex === -1) {
+            return false;
+        }
+        this.elements.splice(foundIndex, 1);
+        return true;
+    }
 }
 
 /**
@@ -45,7 +59,6 @@ export type PriorityListGroupMap<T extends PriorityListElement> = Map<number, Pr
  */
 export class GroupedPriorityList<T extends PriorityListElement> {
     readonly groups: PriorityListGroupMap<T> = new Map();
-
     /**
      * Add an element to the `GroupedPriorityList`. Selects group based on the elements priority.
      *
@@ -65,17 +78,13 @@ export class GroupedPriorityList<T extends PriorityListElement> {
      * @returns `True` if the element was removed, `false` otherwise.
      */
     remove(element: T): boolean {
-        const group = this.getGroup(element.priority);
-        if (group !== undefined) {
-            const foundIndex = group.elements.indexOf(element);
-            if (foundIndex >= 0) {
-                group.elements.splice(foundIndex, 1);
-                if (group.elements.length === 0) {
-                    const normalizedPriority = Math.floor(element.priority);
-                    this.groups.delete(normalizedPriority);
-                }
-                return true;
+        const group = this.findGroup(element.priority);
+        if (group !== undefined && group.remove(element)) {
+            if (group.elements.length === 0) {
+                this.groups.delete(group.priority);
             }
+
+            return true;
         }
         return false;
     }
@@ -104,19 +113,12 @@ export class GroupedPriorityList<T extends PriorityListElement> {
         return this;
     }
 
-    /**
-     * Return a sorted list of [[PriorityListGroup]]s.
-     */
-    get sortedGroups(): Array<PriorityListGroup<T>> {
-        const groups: Array<PriorityListGroup<T>> = [];
-        for (const priorityList of this.groups) {
-            groups.push(priorityList[1]);
+    clone(): GroupedPriorityList<T> {
+        const clone = new GroupedPriorityList<T>();
+        for (const [priority, group] of this.groups) {
+            clone.groups.set(priority, group.clone());
         }
-
-        groups.sort((a: PriorityListGroup<T>, b: PriorityListGroup<T>) => {
-            return b.priority - a.priority;
-        });
-        return groups;
+        return clone;
     }
 
     /**
@@ -163,7 +165,7 @@ export class GroupedPriorityList<T extends PriorityListElement> {
         if (group === undefined) {
             const normalizedPriority = Math.floor(priority);
             group = new PriorityListGroup<T>(normalizedPriority);
-            this.groups.set(normalizedPriority, group);
+            this.groups.set(group.priority, group);
         }
 
         return group;

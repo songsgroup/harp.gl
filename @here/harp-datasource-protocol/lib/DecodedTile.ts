@@ -8,11 +8,13 @@ import {
     equirectangularProjection,
     mercatorProjection,
     normalizedEquirectangularProjection,
+    OrientedBox3,
     Projection,
     sphereProjection,
+    Vector3Like,
     webMercatorProjection
 } from "@here/harp-geoutils";
-import { Technique } from "./Techniques";
+import { IndexedTechnique } from "./Techniques";
 import { TileInfo } from "./TileInfo";
 
 /**
@@ -21,13 +23,22 @@ import { TileInfo } from "./TileInfo";
  * metadata describing these buffers.
  */
 export interface DecodedTile {
-    techniques: Technique[];
+    techniques: IndexedTechnique[];
     geometries: Geometry[];
+    pathGeometries?: PathGeometry[];
     textPathGeometries?: TextPathGeometry[];
     textGeometries?: TextGeometry[]; // ### deprecate
     poiGeometries?: PoiGeometry[];
     tileInfo?: TileInfo;
+    maxGeometryHeight?: number;
     decodeTime?: number; // time used to decode (in ms)
+
+    /**
+     * The default bounding box in [[Tile]] is based on the geo box of the tile.
+     * For data-sources that have 3d data this is not sufficient so the data-source can provide a
+     * more accurate bounding box once the data is decoded.
+     */
+    boundingBox?: OrientedBox3;
 
     /**
      * Tile data Copyright holder identifiers.
@@ -41,6 +52,20 @@ export interface DecodedTile {
 }
 
 /**
+ * This object keeps the path of the geometry. Space of the path depends on the
+ * use case, so could be either world or local tile space.
+ */
+export interface PathGeometry {
+    path: Vector3Like[];
+}
+
+/**
+ * Attributes corresponding to some decoded geometry. It may be either a map
+ * of multiple attributes or just a number with the geometry's feature id.
+ */
+export type AttributeMap = {} | number;
+
+/**
  * This object keeps textual data together with metadata to place it on the map.
  */
 export interface TextPathGeometry {
@@ -48,7 +73,7 @@ export interface TextPathGeometry {
     pathLengthSqr: number;
     text: string;
     technique: number;
-    featureId?: number;
+    objInfos?: AttributeMap;
 }
 
 /**
@@ -60,10 +85,18 @@ export function getArrayConstructor(attr: BufferElementType) {
     switch (attr) {
         case "float":
             return Float32Array;
+        case "uint8":
+            return Uint8Array;
         case "uint16":
             return Uint16Array;
         case "uint32":
             return Uint32Array;
+        case "int8":
+            return Int8Array;
+        case "int16":
+            return Int16Array;
+        case "int32":
+            return Int32Array;
     }
 }
 
@@ -104,18 +137,12 @@ export enum GeometryType {
  */
 export interface Geometry {
     type: GeometryType;
-    vertexAttributes: BufferAttribute[];
+    vertexAttributes?: BufferAttribute[];
     interleavedVertexAttributes?: InterleavedBufferAttribute[];
     index?: BufferAttribute;
     edgeIndex?: BufferAttribute;
     groups: Group[];
     uuid?: string;
-
-    /**
-     * Optional list of feature IDs. Currently only `Number` is supported, will fail if features
-     * have IDs with type `Long`.
-     */
-    featureIds?: Array<number | undefined>;
 
     /**
      * Optional list of feature start indices. The indices point into the index attribute.
@@ -125,14 +152,21 @@ export interface Geometry {
     /**
      * Optional array of objects. It can be used to pass user data from the geometry to the mesh.
      */
-    objInfos?: Array<{} | undefined>;
+    objInfos?: AttributeMap[];
 }
 
 /**
- * The data stored in Buffers' elements can be of the following elementary types: float, unsigned
- * integer (either 16-bit or 32-bit long)
+ * The data stored in Buffers' elements can be of the following elementary types: float, signed or
+ * unsigned integers (8-bit, 16-bit or 32-bit long).
  */
-export type BufferElementType = "float" | "uint16" | "uint32";
+export type BufferElementType =
+    | "float"
+    | "uint8"
+    | "uint16"
+    | "uint32"
+    | "int8"
+    | "int16"
+    | "int32";
 
 /**
  * Structured clone compliant WebGL buffer and its metadata.
@@ -142,6 +176,7 @@ export interface BufferAttribute {
     buffer: ArrayBufferLike;
     type: BufferElementType;
     itemCount: number;
+    normalized?: boolean;
 }
 
 /**
@@ -152,8 +187,8 @@ export interface TextGeometry {
     positions: BufferAttribute;
     texts: number[];
     technique?: number;
-    featureId?: number;
     stringCatalog?: Array<string | undefined>;
+    objInfos?: AttributeMap[];
 }
 
 /**
@@ -168,8 +203,8 @@ export interface PoiGeometry {
      */
     imageTextures?: number[];
     technique?: number;
-    featureId?: number;
     stringCatalog?: Array<string | undefined>;
+    objInfos?: AttributeMap[];
 }
 
 /**
@@ -187,6 +222,11 @@ export interface Group {
      */
     renderOrderOffset?: number;
     featureId?: number;
+
+    /**
+     * Contains tile offsets if its [[Geometry]] has been created.
+     */
+    createdOffsets?: number[];
 }
 
 /**
@@ -229,4 +269,23 @@ export function getProjectionName(projection: Projection): string | never {
         return "equirectangular";
     }
     throw new Error("Unknown projection");
+}
+
+/**
+ * @returns Feature id from the provided attribute map.
+ */
+export function getFeatureId(attributeMap: AttributeMap | undefined): number {
+    if (attributeMap === undefined) {
+        return 0;
+    }
+
+    if (typeof attributeMap === "number") {
+        return attributeMap;
+    }
+
+    if (attributeMap.hasOwnProperty("$id")) {
+        return (attributeMap as any).$id as number;
+    }
+
+    return 0;
 }

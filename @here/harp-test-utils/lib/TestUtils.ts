@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { assert } from "chai";
 import * as sinon from "sinon";
 
 /**
@@ -141,6 +142,90 @@ export function willEventually<T = void>(test: () => T): Promise<T> {
     });
 }
 
+/**
+ * Assert that promise is rejected.
+ *
+ * Check that promise `v` (passed directly or result of function) is eventually rejected with error
+ * that matches `errorMessagePattern`.
+ */
+export async function assertRejected(
+    v: Promise<any> | (() => Promise<any>),
+    errorMessagePattern: string | RegExp
+) {
+    let r: any;
+    try {
+        r = await Promise.resolve(typeof v === "function" ? v() : v);
+    } catch (error) {
+        if (typeof errorMessagePattern === "string") {
+            errorMessagePattern = new RegExp(errorMessagePattern);
+        }
+        assert.match(error.message, errorMessagePattern);
+        return;
+    }
+    assert.fail(`expected exception that matches ${errorMessagePattern}, but received '${r}'`);
+}
+
+type IConsoleLike = Pick<Console, "error" | "info" | "log" | "warn">;
+
+/**
+ * Assert that synchronous test function `fn` will logs specfic message.
+ *
+ * Captures error messages of `type` from `channel` and asserts that at least one contain
+ * message that matches `errorMessagePattern`.
+ *
+ * Swallows matching messages, so they don't appear in actual output so "test log" is clean from
+ * expected messages.
+ *
+ * Example with `console.warn`
+ * ```
+ *   assertWillLogSync(() => {
+ *       console.warn("error: fooBar"),
+ *       console,
+ *       "warn"
+ *       /error/
+ *   );
+ * ```
+ *
+ * @param fn test function that shall provoke certain log output
+ * @param channel `Console` like object
+ * @param type type of console message i.e `"log" | "error" | "warn" | "info`
+ * @param errorMessagePattern string or regular expression that we look for in logs
+ */
+export function assertLogsSync(
+    fn: () => void,
+    channel: IConsoleLike,
+    type: keyof IConsoleLike,
+    errorMessagePattern: string | RegExp
+) {
+    const errorMessageRe =
+        typeof errorMessagePattern === "string"
+            ? new RegExp(errorMessagePattern)
+            : errorMessagePattern;
+    const capturedMessages: string[] = [];
+    const original = channel[type];
+    const stub = sinon.stub(channel, type).callsFake((...args: any[]) => {
+        const message = args.join(" ");
+        if (errorMessageRe.test(message)) {
+            capturedMessages.push(message);
+        } else {
+            original.apply(channel, args as [any?, ...any[]]);
+        }
+    });
+    const cleanup = () => {
+        stub.restore();
+    };
+
+    try {
+        fn();
+        cleanup();
+        const hasMatching = capturedMessages.find(message => errorMessageRe.test(message));
+        assert(hasMatching, `expected log message matching '${errorMessagePattern}' to be logged`);
+    } catch (error) {
+        cleanup();
+        throw error;
+    }
+}
+
 export interface EventSource<T> {
     addEventListener(type: string, listener: (event: T) => void): void;
     removeEventListener(type: string, listener: (event: T) => void): void;
@@ -207,7 +292,9 @@ function reportAsyncFailuresAfterTestEnd(this: any) {
 
         // Note, this is actually mocha.IHookCallbackContext but it's not imported to not include
         // whole mocha dependency only for this very declaration.
-        this.test.error(`waitEvent didn't receive '${waitEventWaitedEvent}' before test timeouted`);
+        this.test.error(
+            new Error(`waitEvent didn't receive '${waitEventWaitedEvent}' before test timeouted`)
+        );
     }
 
     if (lastWaitedError) {
@@ -223,7 +310,7 @@ function reportAsyncFailuresAfterTestEnd(this: any) {
 }
 
 if (typeof beforeEach !== "undefined") {
-    beforeEach(function() {
+    beforeEach(function(this: Mocha.Context) {
         // Save current test so willEventually && waitForEvent can check that current test is still
         // executing.
         mochaCurrentTest = this.currentTest;

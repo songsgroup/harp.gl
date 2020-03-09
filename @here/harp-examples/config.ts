@@ -1,14 +1,18 @@
 /*
- * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Copyright (C) 2017-2020 HERE Europe B.V.
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
 
 /** @hidden */
-export const appId = "devportal-demo-20180625";
+export const apikey = "J0IJdYzKDYS3nHVDDEWETIqK3nAcxqW42vz7xeSq61M";
 
 /** @hidden */
-export const appCode = "9v2BkviRwi9Ot26kp2IysQ";
-
-/** @hidden */
-export const accessToken = "AB5W33i5bYqI2dY_cDYIcG0";
+export const copyrightInfo = [
+    {
+        id: "here.com",
+        year: new Date().getFullYear(),
+        label: "HERE",
+        link: "https://legal.here.com/terms"
+    }
+];

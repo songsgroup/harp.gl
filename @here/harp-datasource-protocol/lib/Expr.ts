@@ -3,792 +3,839 @@
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
+
+import { Env, Value } from "./Env";
+import { ExprEvaluator, ExprEvaluatorContext, OperatorDescriptor } from "./ExprEvaluator";
+import { ExprInstantiator, InstantiationContext } from "./ExprInstantiator";
+import { ExprParser } from "./ExprParser";
+import { ExprPool } from "./ExprPool";
+import {
+    interpolatedPropertyDefinitionToJsonExpr,
+    isInterpolatedPropertyDefinition
+} from "./InterpolatedPropertyDefs";
+import { Definitions, isBoxedDefinition, isLiteralDefinition } from "./Theme";
+
+export * from "./Env";
+
+const exprEvaluator = new ExprEvaluator();
+
+const exprInstantiator = new ExprInstantiator();
+
+export interface ExprVisitor<Result, Context> {
+    visitNullLiteralExpr(expr: NullLiteralExpr, context: Context): Result;
+    visitBooleanLiteralExpr(expr: BooleanLiteralExpr, context: Context): Result;
+    visitNumberLiteralExpr(expr: NumberLiteralExpr, context: Context): Result;
+    visitStringLiteralExpr(expr: StringLiteralExpr, context: Context): Result;
+    visitObjectLiteralExpr(expr: ObjectLiteralExpr, context: Context): Result;
+    visitVarExpr(expr: VarExpr, context: Context): Result;
+    visitHasAttributeExpr(expr: HasAttributeExpr, context: Context): Result;
+    visitCallExpr(expr: CallExpr, context: Context): Result;
+    visitMatchExpr(expr: MatchExpr, context: Context): Result;
+    visitCaseExpr(expr: CaseExpr, context: Context): Result;
+}
+
+/**
+ * The dependencies of an [[Expr]].
+ */
+export class ExprDependencies {
+    /**
+     * The properties needed to evaluate the [[Expr]].
+     */
+    readonly properties = new Set<string>();
+}
+
+class ComputeExprDependencies implements ExprVisitor<void, ExprDependencies> {
+    static instance = new ComputeExprDependencies();
+
+    /**
+     * Gets the dependencies of an [[Expr]].
+     *
+     * @param expr The [[Expr]] to process.
+     * @param scope The evaluation scope. Defaults to [[ExprScope.Value]].
+     * @param dependencies The output [[Set]] of dependency names.
+     */
+    static of(expr: Expr) {
+        const dependencies = new ExprDependencies();
+        expr.accept(this.instance, dependencies);
+        return dependencies;
+    }
+
+    visitNullLiteralExpr(expr: NullLiteralExpr, context: ExprDependencies): void {
+        // nothing to do
+    }
+
+    visitBooleanLiteralExpr(expr: BooleanLiteralExpr, context: ExprDependencies): void {
+        // nothing to do
+    }
+
+    visitNumberLiteralExpr(expr: NumberLiteralExpr, context: ExprDependencies): void {
+        // nothing to do
+    }
+
+    visitStringLiteralExpr(expr: StringLiteralExpr, context: ExprDependencies): void {
+        // nothing to do
+    }
+
+    visitObjectLiteralExpr(expr: ObjectLiteralExpr, context: ExprDependencies): void {
+        // nothing to do
+    }
+
+    visitVarExpr(expr: VarExpr, context: ExprDependencies): void {
+        context.properties.add(expr.name);
+    }
+
+    visitHasAttributeExpr(expr: HasAttributeExpr, context: ExprDependencies): void {
+        context.properties.add(expr.name);
+    }
+
+    visitCallExpr(expr: CallExpr, context: ExprDependencies): void {
+        expr.args.forEach(childExpr => childExpr.accept(this, context));
+
+        switch (expr.op) {
+            case "id":
+                context.properties.add("$id");
+                break;
+            case "geometry-type":
+                context.properties.add("$geometryType");
+                break;
+            default:
+                break;
+        }
+    }
+
+    visitMatchExpr(expr: MatchExpr, context: ExprDependencies): void {
+        expr.value.accept(this, context);
+        expr.branches.forEach(([_, branch]) => branch.accept(this, context));
+        expr.fallback.accept(this, context);
+    }
+
+    visitCaseExpr(expr: CaseExpr, context: ExprDependencies): void {
+        expr.branches.forEach(([condition, branch]) => {
+            condition.accept(this, context);
+            branch.accept(this, context);
+        });
+        expr.fallback.accept(this, context);
+    }
+}
+
+/**
+ * A type represeting JSON values.
+ */
+export type JsonValue = null | boolean | number | string | JsonObject | JsonArray;
+
+/**
+ * A type representing JSON arrays.
+ */
+export interface JsonArray extends Array<JsonValue> {}
+
+/**
+ * A type representing JSON objects.
+ */
+export interface JsonObject {
+    [name: string]: JsonValue;
+}
+
+/**
+ * The JSON representation of an [[Expr]] object.
+ */
+export type JsonExpr = JsonArray;
+
+export function isJsonExpr(v: any): v is JsonExpr {
+    return Array.isArray(v) && v.length > 0 && typeof v[0] === "string";
+}
+
+/**
+ * Internal state needed by [[Expr.fromJSON]] to resolve `"ref"` expressions.
+ * @hidden
+ */
+interface ReferenceResolverState {
+    definitions: Definitions;
+    lockedNames: Set<string>;
+    cache: Map<string, Expr>;
+}
+
+/**
+ * The evaluation scope of an [[Expr]].
+ */
+export enum ExprScope {
+    /**
+     * The scope of an [[Expr]] used as value of an attribute.
+     */
+    Value,
+
+    /**
+     * The scope of an [[Expr]] used in a [[Technique]] `when` condition.
+     */
+    Condition,
+
+    /**
+     * The scope of an [[Expr]] used as dynamic property attribute value.
+     */
+    Dynamic
+}
+
 /**
  * Abstract class defining a shape of a [[Theme]]'s expression
  */
 export abstract class Expr {
     /**
-     * Returns a parsed expression.
-     * @param code String which describes the type of expression to be parsed, for example "var".
+     * Tests of given value is an [[Expr]].
+     *
+     * @param value The object to test.
      */
-    static parse(code: string): Expr {
-        const parser = new Parser(code);
+    static isExpr(value: any): value is Expr {
+        return value instanceof Expr;
+    }
+
+    /**
+     * Creates an expression from the given `code`.
+     *
+     * @param code The code to parse.
+     * @returns The parsed [[Expr]].
+     * @deprecated
+     */
+    static parse(code: string): Expr | never {
+        const parser = new ExprParser(code);
         const expr = parser.parse();
         return expr;
     }
 
-    constructor(readonly kind: ExprKind) {}
+    /**
+     * Parse expression in JSON form.
+     *
+     * If `definitions` are defined, then references (`['ref', name]`) are resolved.
+     *
+     * Pass `definitionExprCache` to reuse `Expr` instances created from definitions across
+     * many `fromJSON` calls.
+     *
+     * @param node expression in JSON format to parse
+     * @param definitions optional set of definitions needed definition resolved by `ref` operator
+     * @param definitionExprCache optional cache of `Expr` instances derived from `definitions`
+     */
+    static fromJSON(
+        node: JsonValue,
+        definitions?: Definitions,
+        definitionExprCache?: Map<string, Expr>
+    ) {
+        const referenceResolverState: ReferenceResolverState | undefined =
+            definitions !== undefined
+                ? {
+                      definitions,
+                      lockedNames: new Set(),
+                      cache: definitionExprCache || new Map<string, Expr>()
+                  }
+                : undefined;
+
+        return parseNode(node, referenceResolverState);
+    }
+
+    private m_dependencies?: ExprDependencies;
+    private m_isDynamic?: boolean;
+
     /**
      * Evaluate an expression returning a [[Value]] object.
-     */
-
-    abstract evaluate(env: Env): Value | never;
-}
-
-/**
- * @hidden
- */
-type UnaryOp = "has" | "!";
-
-/**
- * @hidden
- */
-type RelationalOp = "<" | ">" | "<=" | ">=";
-
-/**
- * @hidden
- */
-type EqualityOp = "~=" | "^=" | "$=" | "==" | "!=";
-
-/**
- * @hidden
- */
-type BinaryOp = RelationalOp | EqualityOp;
-
-/**
- * @hidden
- */
-type LogicalOp = "&&" | "||";
-
-/**
- * @hidden
- */
-type Literal = "boolean" | "number" | "string";
-
-/**
- * @hidden
- */
-type ExprKind = "var" | "in" | Literal | UnaryOp | RelationalOp | EqualityOp | LogicalOp;
-
-/**
- * @hidden
- */
-export type Value = undefined | boolean | number | string;
-
-/**
- * @hidden
- */
-export class Env {
-    /**
-     * Returns property in [[Env]] by name.
      *
-     * @param name Name of property.
+     * @param env The [[Env]] used to lookup symbols.
+     * @param scope The evaluation scope. Defaults to [[ExprScope.Value]].
+     * @param cache A cache of previously computed results.
      */
-    lookup(_name: string): Value {
-        return undefined;
+    evaluate(
+        env: Env,
+        scope: ExprScope = ExprScope.Value,
+        cache?: Map<Expr, Value>
+    ): Value | never {
+        return this.accept(
+            exprEvaluator,
+            new ExprEvaluatorContext(exprEvaluator, env, scope, cache)
+        );
     }
 
     /**
-     * Return an object containing all properties of this environment. (Here: empty object).
+     * Instantiates this [[Expr]] by resolving references to the `get` and
+     * `has` operator using the given instantiation context.
+     *
+     * @param context The [[InstantationContext]] used to resolve names.
      */
-    unmap(): any {
-        return {};
+    instantiate(context: InstantiationContext): Expr {
+        return this.accept(exprInstantiator, context);
     }
+
+    /**
+     * Gets the dependencies of this [[Expr]].
+     */
+    dependencies(): ExprDependencies {
+        if (!this.m_dependencies) {
+            this.m_dependencies = ComputeExprDependencies.of(this);
+        }
+        return this.m_dependencies;
+    }
+
+    /**
+     * Create a unique object that is structurally equivalent to this [[Expr]].
+     *
+     * @param pool The [[ExprPool]] used to create a unique
+     * equivalent object of this [[Expr]].
+     */
+    intern(pool: ExprPool): Expr {
+        return pool.add(this);
+    }
+
+    toJSON(): JsonValue {
+        return new ExprSerializer().serialize(this);
+    }
+
+    /**
+     * Returns `true` if a dynamic execution context is required to evaluate this [[Expr]].
+     */
+    isDynamic(): boolean {
+        if (this.m_isDynamic === undefined) {
+            this.m_isDynamic = this.exprIsDynamic();
+        }
+        return this.m_isDynamic;
+    }
+
+    abstract accept<Result, Context>(
+        visitor: ExprVisitor<Result, Context>,
+        context: Context
+    ): Result;
+
+    /**
+     * Update the dynamic state of this [[Expr]].
+     *
+     * [[exprIsDynamic]] must never be called directly.
+     *
+     * @hidden
+     */
+    protected abstract exprIsDynamic(): boolean;
 }
 
 /**
  * @hidden
  */
-export interface ValueMap {
-    [name: string]: Value;
-}
+export type RelationalOp = "<" | ">" | "<=" | ">=";
 
 /**
- * Adds access to map specific environment properties.
+ * @hidden
  */
-export class MapEnv extends Env {
-    constructor(readonly entries: ValueMap, private readonly parent?: Env) {
-        super();
-    }
+export type EqualityOp = "~=" | "^=" | "$=" | "==" | "!=";
 
-    /**
-     * Returns property in [[Env]] by name.
-     *
-     * @param name Name of property.
-     */
-    lookup(name: string): Value {
-        const value = this.entries[name];
-
-        if (value !== undefined) {
-            return value;
-        }
-
-        return this.parent ? this.parent.lookup(name) : undefined;
-    }
-
-    /**
-     * Return an object containing all properties of this environment, takes care of the parent
-     * object.
-     */
-    unmap(): any {
-        const obj: any = this.parent ? this.parent.unmap() : {};
-
-        for (const key in this.entries) {
-            if (this.entries.hasOwnProperty(key)) {
-                obj[key] = this.entries[key];
-            }
-        }
-        return obj;
-    }
-}
+/**
+ * @hidden
+ */
+export type BinaryOp = RelationalOp | EqualityOp;
 
 /**
  * Var expression.
+ * @hidden
  */
-class VarExpr extends Expr {
+export class VarExpr extends Expr {
     constructor(readonly name: string) {
-        super("var");
+        super();
     }
 
-    evaluate(env: Env): Value | never {
-        const value = env.lookup(this.name);
-        return value;
-    }
-}
-
-/**
- * Number literal expression.
- */
-class NumberLiteralExpr extends Expr {
-    constructor(readonly value: number) {
-        super("number");
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitVarExpr(this, context);
     }
 
-    evaluate(): Value | never {
-        return this.value;
+    /** @override */
+    protected exprIsDynamic() {
+        return false;
     }
 }
 
-/**
- * String literal expression.
- */
-class StringLiteralExpr extends Expr {
-    constructor(readonly value: string) {
-        super("string");
+export abstract class LiteralExpr extends Expr {
+    /**
+     * Create a [[LiteralExpr]] from the given value.
+     *
+     * @param value A constant value.
+     */
+    static fromValue(value: Value): Expr {
+        switch (typeof value) {
+            case "boolean":
+                return new BooleanLiteralExpr(value);
+            case "number":
+                return new NumberLiteralExpr(value);
+            case "string":
+                return new StringLiteralExpr(value);
+            case "object":
+                return value === null ? NullLiteralExpr.instance : new ObjectLiteralExpr(value);
+            default:
+                throw new Error(`failed to create a literal from '${value}'`);
+        } // switch
     }
 
-    evaluate(): Value | never {
-        return this.value;
-    }
-}
+    abstract get value(): Value;
 
-/**
- * A has expression with an attribute, for example `has(ref)`.
- */
-class HasAttributeExpr extends Expr {
-    constructor(readonly attribute: string) {
-        super("has");
-    }
-
-    evaluate(env: Env): Value | never {
-        return env.lookup(this.attribute) !== undefined;
-    }
-}
-
-/**
- * A contains expression.
- */
-class ContainsExpr extends Expr {
-    constructor(readonly value: Expr, readonly elements: Expr[]) {
-        super("in");
-    }
-
-    evaluate(env: Env): Value | never {
-        const value = this.value.evaluate(env);
-        for (const e of this.elements) {
-            const element = e.evaluate(env);
-            if (value === element) {
-                return true;
-            }
-        }
+    /** @override */
+    protected exprIsDynamic() {
         return false;
     }
 }
 
 /**
- * A `not` expression.
+ * Null literal expression.
+ * @hidden
  */
-class NotExpr extends Expr {
-    constructor(readonly expr: Expr) {
-        super("!");
+export class NullLiteralExpr extends LiteralExpr {
+    static instance = new NullLiteralExpr();
+    /** @override */
+    readonly value: Value = null;
+
+    protected constructor() {
+        super();
     }
 
-    evaluate(env: Env): Value | never {
-        return !this.expr.evaluate(env);
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitNullLiteralExpr(this, context);
+    }
+
+    /** @override */
+    protected exprIsDynamic() {
+        return false;
     }
 }
 
 /**
- * A binary operator expression
+ * Boolean literal expression.
+ * @hidden
  */
-class BinaryExpr extends Expr {
-    constructor(readonly op: BinaryOp, readonly left: Expr, readonly right: Expr) {
-        super(op);
+export class BooleanLiteralExpr extends LiteralExpr {
+    constructor(readonly value: boolean) {
+        super();
     }
 
-    evaluate(env: Env): Value | never {
-        const left = this.left.evaluate(env);
-        const right = this.right.evaluate(env);
-        switch (this.op) {
-            case "~=": {
-                if (typeof left === "string" && typeof right === "string") {
-                    return left.indexOf(right) !== -1;
-                }
-                return false;
-            }
-            case "^=": {
-                if (typeof left === "string" && typeof right === "string") {
-                    return left.startsWith(right);
-                }
-                return false;
-            }
-            case "$=": {
-                if (typeof left === "string" && typeof right === "string") {
-                    return left.endsWith(right);
-                }
-                return false;
-            }
-            case "==":
-                return left === right;
-            case "!=":
-                return left !== right;
-            case "<":
-                return left !== undefined && right !== undefined ? left < right : undefined;
-            case ">":
-                return left !== undefined && right !== undefined ? left > right : undefined;
-            case "<=":
-                return left !== undefined && right !== undefined ? left <= right : undefined;
-            case ">=":
-                return left !== undefined && right !== undefined ? left >= right : undefined;
-        }
-        throw new Error(`invalid relational op ${this.op}`);
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitBooleanLiteralExpr(this, context);
     }
 }
 
 /**
- * Logical expression.
+ * Number literal expression.
+ * @hidden
  */
-class LogicalExpr extends Expr {
-    constructor(readonly op: LogicalOp, readonly left: Expr, readonly right: Expr) {
-        super(op);
+export class NumberLiteralExpr extends LiteralExpr {
+    constructor(readonly value: number) {
+        super();
     }
 
-    evaluate(env: Env): Value | never {
-        const value = this.left.evaluate(env);
-        switch (this.op) {
-            case "||":
-                return value || this.right.evaluate(env);
-            case "&&":
-                return value && this.right.evaluate(env);
-        } // switch
-        throw new Error(`invalid logical op ${this.op}`);
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitNumberLiteralExpr(this, context);
     }
 }
 
 /**
- * Character value
+ * String literal expression.
+ * @hidden
  */
-enum Character {
-    Tab = 9,
-    Lf = 10,
-    Cr = 13,
-    Space = 32,
-    LParen = 40,
-    RParen = 41,
-    Comma = 44,
-    Dot = 46,
-    LBracket = 91,
-    Backslash = 92,
-    RBracket = 93,
-    _0 = 48,
-    _9 = 57,
-    _ = 95,
-    A = 64,
-    Z = 90,
-    a = 97,
-    z = 122,
-    DoubleQuote = 34,
-    SingleQuote = 39,
-    Exclaim = 33,
-    Equal = 61,
-    Caret = 94,
-    Tilde = 126,
-    Dollar = 36,
-    Less = 60,
-    Greater = 62,
-    Bar = 124,
-    Amp = 38
+export class StringLiteralExpr extends LiteralExpr {
+    constructor(readonly value: string) {
+        super();
+    }
+
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitStringLiteralExpr(this, context);
+    }
 }
 
 /**
- * Check if a codepoint is a whitespace character.
+ * Object literal expression.
+ * @hidden
  */
-function isSpace(codepoint: number): boolean {
-    switch (codepoint) {
-        case Character.Tab:
-        case Character.Lf:
-        case Character.Cr:
-        case Character.Space:
+export class ObjectLiteralExpr extends LiteralExpr {
+    constructor(readonly value: object) {
+        super();
+    }
+
+    get isArrayLiteral() {
+        return Array.isArray(this.value);
+    }
+
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitObjectLiteralExpr(this, context);
+    }
+}
+
+/**
+ * A has expression with an attribute, for example `has(ref)`.
+ * @hidden
+ */
+export class HasAttributeExpr extends Expr {
+    constructor(readonly name: string) {
+        super();
+    }
+
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitHasAttributeExpr(this, context);
+    }
+
+    /** @override */
+    protected exprIsDynamic() {
+        return false;
+    }
+}
+
+/**
+ * @hidden
+ */
+export class CallExpr extends Expr {
+    descriptor?: OperatorDescriptor;
+
+    constructor(readonly op: string, readonly args: Expr[]) {
+        super();
+    }
+
+    /**
+     * Returns the child nodes of this [[Expr]].
+     * @deprecated
+     */
+    get children() {
+        return this.args;
+    }
+
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitCallExpr(this, context);
+    }
+
+    /** @override */
+    protected exprIsDynamic() {
+        const descriptor = this.descriptor || ExprEvaluator.getOperator(this.op);
+
+        if (descriptor && descriptor.isDynamicOperator && descriptor.isDynamicOperator(this)) {
             return true;
+        }
+
+        return this.args.some(e => e.isDynamic());
+    }
+}
+
+/**
+ * @hidden
+ */
+export type MatchLabel = number | string | number[] | string[];
+
+/**
+ * @hidden
+ */
+export class MatchExpr extends Expr {
+    /**
+     * Tests if the given JSON node is a valid label for the `"match"` operator.
+     *
+     * @param node A JSON value.
+     */
+    static isValidMatchLabel(node: JsonValue): node is MatchLabel {
+        switch (typeof node) {
+            case "number":
+            case "string":
+                return true;
+            case "object":
+                if (!Array.isArray(node) || node.length === 0) {
+                    return false;
+                }
+                const elementTy = typeof node[0];
+                if (elementTy === "number" || elementTy === "string") {
+                    return node.every(t => typeof t === elementTy);
+                }
+                return false;
+            default:
+                return false;
+        } // switch
+    }
+
+    constructor(
+        readonly value: Expr,
+        readonly branches: Array<[MatchLabel, Expr]>,
+        readonly fallback: Expr
+    ) {
+        super();
+    }
+
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitMatchExpr(this, context);
+    }
+
+    /** @override */
+    protected exprIsDynamic() {
+        return (
+            this.value.isDynamic() ||
+            this.branches.some(([_, branch]) => branch.isDynamic()) ||
+            this.fallback.isDynamic()
+        );
+    }
+}
+
+/**
+ * @hidden
+ */
+export class CaseExpr extends Expr {
+    constructor(readonly branches: Array<[Expr, Expr]>, readonly fallback: Expr) {
+        super();
+    }
+
+    /** @override */
+    accept<Result, Context>(visitor: ExprVisitor<Result, Context>, context: Context): Result {
+        return visitor.visitCaseExpr(this, context);
+    }
+
+    /** @override */
+    protected exprIsDynamic() {
+        return (
+            this.branches.some(([cond, branch]) => cond.isDynamic() || branch.isDynamic()) ||
+            this.fallback.isDynamic()
+        );
+    }
+}
+
+/**
+ * @hidden
+ */
+class ExprSerializer implements ExprVisitor<JsonValue, void> {
+    serialize(expr: Expr): JsonValue {
+        return expr.accept(this, undefined);
+    }
+
+    visitNullLiteralExpr(expr: NullLiteralExpr, context: void): JsonValue {
+        return null;
+    }
+
+    visitBooleanLiteralExpr(expr: BooleanLiteralExpr, context: void): JsonValue {
+        return expr.value;
+    }
+
+    visitNumberLiteralExpr(expr: NumberLiteralExpr, context: void): JsonValue {
+        return expr.value;
+    }
+
+    visitStringLiteralExpr(expr: StringLiteralExpr, context: void): JsonValue {
+        return expr.value;
+    }
+
+    visitObjectLiteralExpr(expr: ObjectLiteralExpr, context: void): JsonValue {
+        return ["literal", expr.value as JsonObject];
+    }
+
+    visitVarExpr(expr: VarExpr, context: void): JsonValue {
+        return ["get", expr.name];
+    }
+
+    visitHasAttributeExpr(expr: HasAttributeExpr, context: void): JsonValue {
+        return ["has", expr.name];
+    }
+
+    visitCallExpr(expr: CallExpr, context: void): JsonValue {
+        return [expr.op, ...expr.args.map(childExpr => this.serialize(childExpr))];
+    }
+
+    visitMatchExpr(expr: MatchExpr, context: void): JsonValue {
+        const branches: JsonValue[] = [];
+        for (const [label, body] of expr.branches) {
+            branches.push(label, this.serialize(body));
+        }
+        return ["match", this.serialize(expr.value), ...branches, this.serialize(expr.fallback)];
+    }
+
+    visitCaseExpr(expr: CaseExpr, context: void): JsonValue {
+        const branches: JsonValue[] = [];
+        for (const [condition, body] of expr.branches) {
+            branches.push(this.serialize(condition), this.serialize(body));
+        }
+        return ["case", ...branches, this.serialize(expr.fallback)];
+    }
+}
+
+function parseNode(
+    node: JsonValue,
+    referenceResolverState: ReferenceResolverState | undefined
+): Expr {
+    if (Array.isArray(node)) {
+        return parseCall(node, referenceResolverState);
+    } else if (node === null) {
+        return NullLiteralExpr.instance;
+    } else if (typeof node === "boolean") {
+        return new BooleanLiteralExpr(node);
+    } else if (typeof node === "number") {
+        return new NumberLiteralExpr(node);
+    } else if (typeof node === "string") {
+        return new StringLiteralExpr(node);
+    }
+    throw new Error(`failed to create expression from: ${JSON.stringify(node)}`);
+}
+
+function parseCall(node: JsonArray, referenceResolverState?: ReferenceResolverState): Expr {
+    const op = node[0];
+
+    if (typeof op !== "string") {
+        throw new Error("expected a builtin function name");
+    }
+
+    switch (op) {
+        case "!has":
+        case "!in":
+            return new CallExpr("!", [parseCall([op.slice(1), ...node.slice(1)])]);
+
+        case "ref":
+            return resolveReference(node, referenceResolverState);
+
+        case "get":
+            return parseGetExpr(node, referenceResolverState);
+
+        case "has":
+            return parseHasExpr(node, referenceResolverState);
+
+        case "literal":
+            return parseLiteralExpr(node);
+
+        case "match":
+            return parseMatchExpr(node, referenceResolverState);
+
+        case "case":
+            return parseCaseExpr(node, referenceResolverState);
+
         default:
-            return false;
+            return makeCallExpr(op, node, referenceResolverState);
     } // switch
 }
 
-/**
- * Check if codepoint is a digit character.
- */
-function isNumber(codepoint: number): boolean {
-    return codepoint >= Character._0 && codepoint <= Character._9;
+function parseGetExpr(node: JsonArray, referenceResolverState: ReferenceResolverState | undefined) {
+    if (node[2] !== undefined) {
+        return makeCallExpr("get", node, referenceResolverState);
+    }
+    const name = node[1];
+    if (typeof name !== "string") {
+        throw new Error(`expected the name of an attribute`);
+    }
+    return new VarExpr(name);
 }
 
-/**
- * Check if codepoint is a letter character.
- */
-function isLetter(codepoint: number): boolean {
-    return (
-        (codepoint >= Character.a && codepoint <= Character.z) ||
-        (codepoint >= Character.A && codepoint <= Character.Z)
+function parseHasExpr(node: JsonArray, referenceResolverState: ReferenceResolverState | undefined) {
+    if (node[2] !== undefined) {
+        return makeCallExpr("has", node, referenceResolverState);
+    }
+    const name = node[1];
+    if (typeof name !== "string") {
+        throw new Error(`expected the name of an attribute`);
+    }
+    return new HasAttributeExpr(name);
+}
+
+function parseLiteralExpr(node: JsonArray) {
+    const obj = node[1];
+    if (obj === null || typeof obj !== "object") {
+        throw new Error("expected an object or array literal");
+    }
+    return new ObjectLiteralExpr(obj);
+}
+
+function parseMatchExpr(
+    node: JsonArray,
+    referenceResolverState: ReferenceResolverState | undefined
+) {
+    if (node.length < 4) {
+        throw new Error("not enough arguments");
+    }
+    if (!(node.length % 2)) {
+        throw new Error("fallback is missing in 'match' expression");
+    }
+    const value = parseNode(node[1], referenceResolverState);
+    const conditions: Array<[MatchLabel, Expr]> = [];
+    for (let i = 2; i < node.length - 1; i += 2) {
+        const label = node[i];
+        if (!MatchExpr.isValidMatchLabel(label)) {
+            throw new Error(`'${JSON.stringify(label)}' is not a valid label for 'match'`);
+        }
+        const expr = parseNode(node[i + 1], referenceResolverState);
+        conditions.push([label, expr]);
+    }
+    const fallback = parseNode(node[node.length - 1], referenceResolverState);
+    return new MatchExpr(value, conditions, fallback);
+}
+
+function parseCaseExpr(
+    node: JsonArray,
+    referenceResolverState: ReferenceResolverState | undefined
+) {
+    if (node.length < 3) {
+        throw new Error("not enough arguments");
+    }
+    if (node.length % 2) {
+        throw new Error("fallback is missing in 'case' expression");
+    }
+    const branches: Array<[Expr, Expr]> = [];
+    for (let i = 1; i < node.length - 1; i += 2) {
+        const condition = parseNode(node[i], referenceResolverState);
+        const expr = parseNode(node[i + 1], referenceResolverState);
+        branches.push([condition, expr]);
+    }
+    const caseFallback = parseNode(node[node.length - 1], referenceResolverState);
+    return new CaseExpr(branches, caseFallback);
+}
+
+function makeCallExpr(
+    op: string,
+    node: any[],
+    referenceResolverState?: ReferenceResolverState
+): Expr {
+    return new CallExpr(
+        op,
+        node.slice(1).map(childExpr => parseNode(childExpr, referenceResolverState))
     );
 }
 
-/**
- * Check if codepoint is either a digit or a letter character.
- */
-function isLetterOrNumber(codepoint: number): boolean {
-    return isLetter(codepoint) || isNumber(codepoint);
-}
-
-/**
- * Check if codepoint is an identification character: underscore, dollar sign, dot or bracket.
- */
-function isIdentChar(codepoint: number): boolean {
-    return (
-        isLetterOrNumber(codepoint) ||
-        codepoint === Character._ ||
-        codepoint === Character.Dollar ||
-        codepoint === Character.Dot ||
-        codepoint === Character.LBracket ||
-        codepoint === Character.RBracket
-    );
-}
-
-/**
- * Tokens used in theme grammar.
- */
-enum Token {
-    Eof = 0,
-    Error,
-    Identifier,
-    Number,
-    String,
-    Comma,
-    LParen,
-    RParen,
-    LBracket,
-    RBracket,
-    Exclaim,
-    TildeEqual,
-    CaretEqual,
-    DollarEqual,
-    EqualEqual,
-    ExclaimEqual,
-    Less,
-    Greater,
-    LessEqual,
-    GreaterEqual,
-    BarBar,
-    AmpAmp
-}
-
-/**
- * Maps a token to its string name.
- */
-function tokenSpell(token: Token): string {
-    switch (token) {
-        case Token.Eof:
-            return "eof";
-        case Token.Error:
-            return "error";
-        case Token.Identifier:
-            return "identifier";
-        case Token.Number:
-            return "number";
-        case Token.String:
-            return "string";
-        case Token.Comma:
-            return ",";
-        case Token.LParen:
-            return "(";
-        case Token.RParen:
-            return ")";
-        case Token.LBracket:
-            return "[";
-        case Token.RBracket:
-            return "]";
-        case Token.Exclaim:
-            return "!";
-        case Token.TildeEqual:
-            return "~=";
-        case Token.CaretEqual:
-            return "^=";
-        case Token.DollarEqual:
-            return "$=";
-        case Token.EqualEqual:
-            return "==";
-        case Token.ExclaimEqual:
-            return "!=";
-        case Token.Less:
-            return "<";
-        case Token.Greater:
-            return ">";
-        case Token.LessEqual:
-            return "<=";
-        case Token.GreaterEqual:
-            return ">=";
-        case Token.BarBar:
-            return "||";
-        case Token.AmpAmp:
-            return "&&";
-        default:
-            throw new Error(`invalid token ${token}`);
+function resolveReference(node: JsonArray, referenceResolverState?: ReferenceResolverState) {
+    if (typeof node[1] !== "string") {
+        throw new Error(`expected the name of an attribute`);
     }
-}
+    if (referenceResolverState === undefined) {
+        throw new Error(`ref used with no definitions`);
+    }
+    const name = node[1] as string;
 
-/**
- * Lexer class implementation.
- */
-class Lexer {
-    private m_token: Token = Token.Error;
-    private m_index = 0;
-    private m_char: number = Character.Lf;
-    private m_text?: string;
-
-    constructor(readonly code: string) {}
-
-    /**
-     * Single lexer token.
-     */
-    token(): Token {
-        return this.m_token;
+    if (referenceResolverState.lockedNames.has(name)) {
+        throw new Error(`circular referene to '${name}'`);
     }
 
-    /**
-     * Parsed text.
-     */
-    text(): string {
-        return this.m_text || "";
+    if (!(name in referenceResolverState.definitions)) {
+        throw new Error(`definition '${name}' not found`);
     }
 
-    /**
-     * Go to the next token.
-     */
-    next(): Token {
-        this.m_token = this.yylex();
-        if (this.m_token === Token.Error) {
-            throw new Error(`unexpected character ${this.m_char}`);
+    const cachedEntry = referenceResolverState.cache.get(name);
+    if (cachedEntry !== undefined) {
+        return cachedEntry;
+    }
+    let definitionEntry = referenceResolverState.definitions[name] as any;
+    let result: Expr;
+    if (isLiteralDefinition(definitionEntry)) {
+        return Expr.fromJSON(definitionEntry);
+    } else if (isBoxedDefinition(definitionEntry)) {
+        if (isInterpolatedPropertyDefinition(definitionEntry.value)) {
+            // found a reference to an interpolation using
+            // the deprecated object-like syntax.
+            return Expr.fromJSON(interpolatedPropertyDefinitionToJsonExpr(definitionEntry.value));
+        } else if (isJsonExpr(definitionEntry.value)) {
+            definitionEntry = definitionEntry.value;
+        } else {
+            return Expr.fromJSON(definitionEntry.value);
         }
-        return this.m_token;
     }
 
-    private yyinp(): void {
-        this.m_char = this.code.codePointAt(this.m_index++) || 0;
-    }
-
-    private yylex(): Token {
-        this.m_text = undefined;
-
-        while (isSpace(this.m_char)) {
-            this.yyinp();
+    if (isJsonExpr(definitionEntry)) {
+        referenceResolverState.lockedNames.add(name);
+        try {
+            result = parseNode(definitionEntry, referenceResolverState);
+        } finally {
+            referenceResolverState.lockedNames.delete(name);
         }
-
-        if (this.m_char === 0) {
-            return Token.Eof;
-        }
-
-        const ch = this.m_char;
-        this.yyinp();
-
-        switch (ch) {
-            case Character.LParen:
-                return Token.LParen;
-            case Character.RParen:
-                return Token.RParen;
-            case Character.LBracket:
-                return Token.LBracket;
-            case Character.RBracket:
-                return Token.RBracket;
-            case Character.Comma:
-                return Token.Comma;
-
-            case Character.SingleQuote:
-            case Character.DoubleQuote: {
-                const start = this.m_index - 1;
-                while (this.m_char && this.m_char !== ch) {
-                    // ### TODO handle escape sequences
-                    this.yyinp();
-                }
-                if (this.m_char !== ch) {
-                    throw new Error("Unfinished string literal");
-                }
-                this.yyinp();
-                this.m_text = this.code.substring(start, this.m_index - 2);
-                return Token.String;
-            }
-
-            case Character.Exclaim:
-                if (this.m_char === Character.Equal) {
-                    this.yyinp();
-                    return Token.ExclaimEqual;
-                }
-                return Token.Exclaim;
-
-            case Character.Caret:
-                if (this.m_char === Character.Equal) {
-                    this.yyinp();
-                    return Token.CaretEqual;
-                }
-                return Token.Error;
-
-            case Character.Tilde:
-                if (this.m_char === Character.Equal) {
-                    this.yyinp();
-                    return Token.TildeEqual;
-                }
-                return Token.Error;
-
-            case Character.Equal:
-                if (this.m_char === Character.Equal) {
-                    this.yyinp();
-                    return Token.EqualEqual;
-                }
-                return Token.Error;
-
-            case Character.Less:
-                if (this.m_char === Character.Equal) {
-                    this.yyinp();
-                    return Token.LessEqual;
-                }
-                return Token.Less;
-
-            case Character.Greater:
-                if (this.m_char === Character.Equal) {
-                    this.yyinp();
-                    return Token.GreaterEqual;
-                }
-                return Token.Greater;
-
-            case Character.Bar:
-                if (this.m_char === Character.Bar) {
-                    this.yyinp();
-                    return Token.BarBar;
-                }
-                return Token.Error;
-
-            case Character.Amp:
-                if (this.m_char === Character.Amp) {
-                    this.yyinp();
-                    return Token.AmpAmp;
-                }
-                return Token.Error;
-
-            default: {
-                const start = this.m_index - 2;
-                if (
-                    isLetter(ch) ||
-                    ch === Character._ ||
-                    (ch === Character.Dollar && isIdentChar(this.m_char))
-                ) {
-                    while (isIdentChar(this.m_char)) {
-                        this.yyinp();
-                    }
-                    this.m_text = this.code.substring(start, this.m_index - 1);
-                    return Token.Identifier;
-                } else if (isNumber(ch)) {
-                    while (isNumber(this.m_char)) {
-                        this.yyinp();
-                    }
-                    if (this.m_char === Character.Dot) {
-                        this.yyinp();
-                        while (isNumber(this.m_char)) {
-                            this.yyinp();
-                        }
-                    }
-                    this.m_text = this.code.substring(start, this.m_index - 1);
-                    return Token.Number;
-                } else if (ch === Character.Dollar) {
-                    if (this.m_char === Character.Equal) {
-                        this.yyinp();
-                        return Token.DollarEqual;
-                    }
-                    return Token.Error;
-                }
-            }
-        }
-
-        return Token.Error;
+    } else {
+        throw new Error(`unsupported definition ${name}`);
     }
-}
-
-function getEqualityOp(token: Token): EqualityOp | undefined {
-    switch (token) {
-        case Token.TildeEqual:
-            return "~=";
-        case Token.CaretEqual:
-            return "^=";
-        case Token.DollarEqual:
-            return "$=";
-        case Token.EqualEqual:
-            return "==";
-        case Token.ExclaimEqual:
-            return "!=";
-        default:
-            return undefined;
-    } // switch
-}
-
-function getRelationalOp(token: Token): RelationalOp | undefined {
-    switch (token) {
-        case Token.Less:
-            return "<";
-        case Token.Greater:
-            return ">";
-        case Token.LessEqual:
-            return "<=";
-        case Token.GreaterEqual:
-            return ">=";
-        default:
-            return undefined;
-    } // switch
-}
-
-export class Parser {
-    private readonly lex: Lexer;
-
-    constructor(code: string) {
-        this.lex = new Lexer(code);
-        this.lex.next();
-    }
-
-    parse(): Expr | never {
-        return this.parseLogicalOr();
-    }
-
-    private yyexpect(token: Token): void | never {
-        if (this.lex.token() !== token) {
-            throw new Error(
-                `Syntax error: Expected token '${tokenSpell(token)}' but ` +
-                    `found '${tokenSpell(this.lex.token())}'`
-            );
-        }
-        this.lex.next();
-    }
-
-    private parsePrimary(): Expr | never {
-        switch (this.lex.token()) {
-            case Token.Identifier: {
-                const text = this.lex.text();
-                if (text !== "has") {
-                    const expr = new VarExpr(text);
-                    this.lex.next();
-                    return expr;
-                }
-                this.lex.next(); // skip has
-                this.yyexpect(Token.LParen);
-                const attribute = this.lex.text();
-                this.yyexpect(Token.Identifier);
-                this.yyexpect(Token.RParen);
-                return new HasAttributeExpr(attribute);
-            }
-
-            case Token.Number: {
-                const expr = new NumberLiteralExpr(parseFloat(this.lex.text()));
-                this.lex.next();
-                return expr;
-            }
-
-            case Token.String: {
-                const expr = new StringLiteralExpr(this.lex.text());
-                this.lex.next();
-                return expr;
-            }
-
-            case Token.LParen: {
-                this.lex.next();
-                const expr = this.parseLogicalOr();
-                this.yyexpect(Token.RParen);
-                return expr;
-            }
-        }
-
-        throw new Error("Syntax error");
-    }
-
-    private parseUnary(): Expr | never {
-        if (this.lex.token() === Token.Exclaim) {
-            this.lex.next();
-            return new NotExpr(this.parseUnary());
-        }
-        return this.parsePrimary();
-    }
-
-    private parseRelational(): Expr | never {
-        let expr = this.parseUnary();
-        while (true) {
-            if (this.lex.token() === Token.Identifier && this.lex.text() === "in") {
-                this.lex.next();
-                this.yyexpect(Token.LBracket);
-                const elements = [this.parsePrimary()];
-                while (this.lex.token() === Token.Comma) {
-                    this.lex.next();
-                    elements.push(this.parsePrimary());
-                }
-                this.yyexpect(Token.RBracket);
-                expr = new ContainsExpr(expr, elements);
-            } else {
-                const op = getRelationalOp(this.lex.token());
-                if (op === undefined) {
-                    break;
-                }
-                this.lex.next();
-                const right = this.parseUnary();
-                expr = new BinaryExpr(op, expr, right);
-            }
-        }
-        return expr;
-    }
-
-    private parseEquality(): Expr | never {
-        let expr = this.parseRelational();
-        while (true) {
-            const op = getEqualityOp(this.lex.token());
-            if (op === undefined) {
-                break;
-            }
-            this.lex.next();
-            const right = this.parseRelational();
-            expr = new BinaryExpr(op, expr, right);
-        }
-        return expr;
-    }
-
-    private parseLogicalAnd(): Expr | never {
-        let expr = this.parseEquality();
-        while (this.lex.token() === Token.AmpAmp) {
-            this.lex.next();
-            const right = this.parseEquality();
-            expr = new LogicalExpr("&&", expr, right);
-        }
-        return expr;
-    }
-
-    private parseLogicalOr(): Expr | never {
-        let expr = this.parseLogicalAnd();
-        while (this.lex.token() === Token.BarBar) {
-            this.lex.next();
-            const right = this.parseLogicalAnd();
-            expr = new LogicalExpr("||", expr, right);
-        }
-        return expr;
-    }
+    referenceResolverState.cache.set(name, result);
+    return result;
 }

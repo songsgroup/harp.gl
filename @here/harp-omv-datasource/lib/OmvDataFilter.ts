@@ -3,10 +3,12 @@
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
+import { GeometryKind, GeometryKindSet } from "@here/harp-datasource-protocol";
 import { MapEnv } from "@here/harp-datasource-protocol/index-decoder";
 import {
     OmvFeatureFilterDescription,
     OmvFilterDescription,
+    OmvFilterFeatureAttribute,
     OmvFilterString,
     OmvGeometryType,
     OmvLayerFilterDescription
@@ -22,6 +24,11 @@ import {
  * filter for individual features.
  */
 export interface OmvFeatureFilter {
+    /**
+     * Returns `true` if the filter contains rules for specific kinds.
+     */
+    hasKindFilter: boolean;
+
     /**
      * Return `false` if the layer should not be processed.
      *
@@ -56,6 +63,14 @@ export interface OmvFeatureFilter {
      * @param level Level of tile.
      */
     wantsPolygonFeature(layer: string, geometryType: OmvGeometryType, level: number): boolean;
+
+    /**
+     * Return `false` if kind of object is not enabled and the geometry should not be created.
+     *
+     * @param {(string | string[])} kind Tag "kind" of the tag.
+     * @returns {boolean}
+     */
+    wantsKind(kind: string | string[]): boolean;
 }
 
 /**
@@ -122,6 +137,9 @@ export class OmvFeatureFilterDescriptionBuilder {
     private readonly m_linesToIgnore = new Array<OmvFilterDescription>();
     private readonly m_polygonsToProcess = new Array<OmvFilterDescription>();
     private readonly m_polygonsToIgnore = new Array<OmvFilterDescription>();
+
+    private m_kindsToProcess: string[] = [];
+    private m_kindsToIgnore: string[] = [];
 
     /**
      * Builds an `OmvFilterDescription` (internal type) that specifies an [[OmvFeatureFilter]] as
@@ -197,252 +215,124 @@ export class OmvFeatureFilterDescriptionBuilder {
      * @param options Feature options.
      */
     processPoint(options: OmvFeatureFilterDescriptionBuilder.FeatureOption) {
-        this.addItem(
-            this.m_pointsToProcess,
-            options.layer,
-            options.geomType,
-            options.featureClass,
-            options.matchLayer,
-            options.matchClass,
-            options.minLevel,
-            options.maxLevel
-        );
+        this.addItem(this.m_pointsToProcess, options);
     }
 
     /**
      * Add valid point features.
      *
-     * @param options multi feature options
+     * @param options Multi feature options.
      */
     processPoints(options: OmvFeatureFilterDescriptionBuilder.MultiFeatureOption) {
-        this.addItems(
-            this.m_pointsToProcess,
-            options.layer,
-            options.geomTypes,
-            options.featureClasses,
-            options.matchLayer,
-            options.minLevel,
-            options.maxLevel
-        );
+        this.addItems(this.m_pointsToProcess, options);
     }
 
     /**
      * Add a point feature that should be ignored.
      *
-     * @param layer Layer name to be matched
-     * @param geomType Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClass Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Feature options.
      */
-    ignorePoint(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClass: string,
-        matchLayer = OmvFilterString.StringMatch.Match,
-        matchClass = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItem(this.m_ignoredPoints, layer, geomType, featureClass, matchLayer, matchClass);
+    ignorePoint(options: OmvFeatureFilterDescriptionBuilder.FeatureOption) {
+        this.addItem(this.m_ignoredPoints, options);
     }
 
     /**
      * Add point features that should be ignored.
      *
-     * @param layer Layer name to be matched
-     * @param geomTypes Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClasses Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Multi feature options.
      */
-    ignorePoints(
-        layer: string,
-        geomTypes: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClasses: OmvFilterString[],
-        matchLayer = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItems(this.m_ignoredPoints, layer, geomTypes, featureClasses, matchLayer);
+    ignorePoints(options: OmvFeatureFilterDescriptionBuilder.MultiFeatureOption) {
+        this.addItems(this.m_ignoredPoints, options);
     }
 
     /**
      * Add a valid line feature.
      *
-     * @param layer Layer name to be matched.
-     * @param geomType Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClass Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Feature options.
      */
-    processLine(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClass: string,
-        matchLayer = OmvFilterString.StringMatch.Match,
-        matchClass = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItem(this.m_linesToProcess, layer, geomType, featureClass, matchLayer, matchClass);
+    processLine(options: OmvFeatureFilterDescriptionBuilder.FeatureOption) {
+        this.addItem(this.m_linesToProcess, options);
     }
 
     /**
      * Add valid line features.
      *
-     * @param layer Layer name to be matched.
-     * @param geomType Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClasses Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Multi feature options.
      */
-    processLines(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClasses: OmvFilterString[],
-        matchLayer = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItems(this.m_linesToProcess, layer, geomType, featureClasses, matchLayer);
+    processLines(options: OmvFeatureFilterDescriptionBuilder.MultiFeatureOption) {
+        this.addItems(this.m_linesToProcess, options);
     }
 
     /**
      * Ignore a line feature.
      *
-     * @param layer Layer name to be matched
-     * @param geomType Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClass Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Feature options.
      */
-    ignoreLine(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClass: string,
-        matchLayer = OmvFilterString.StringMatch.Match,
-        matchClass = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItem(this.m_linesToIgnore, layer, geomType, featureClass, matchLayer, matchClass);
+    ignoreLine(options: OmvFeatureFilterDescriptionBuilder.FeatureOption) {
+        this.addItem(this.m_linesToIgnore, options);
     }
 
     /**
      * Ignore line features.
      *
-     * @param layer Layer name to be matched.
-     * @param geomType Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClasses Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Multi feature options.
      */
-    ignoreLines(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClasses: OmvFilterString[],
-        matchLayer = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItems(this.m_linesToIgnore, layer, geomType, featureClasses, matchLayer);
+    ignoreLines(options: OmvFeatureFilterDescriptionBuilder.MultiFeatureOption) {
+        this.addItems(this.m_linesToIgnore, options);
     }
 
     /**
      * Add a valid polygon feature.
      *
-     * @param layer Layer name to be matched.
-     * @param geomType Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClass Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Feature options.
      */
-    processPolygon(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClass: string,
-        matchLayer = OmvFilterString.StringMatch.Match,
-        matchClass = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItem(
-            this.m_polygonsToProcess,
-            layer,
-            geomType,
-            featureClass,
-            matchLayer,
-            matchClass
-        );
+    processPolygon(options: OmvFeatureFilterDescriptionBuilder.FeatureOption) {
+        this.addItem(this.m_polygonsToProcess, options);
     }
 
     /**
      * Add valid polygon features.
      *
-     * @param layer Layer name to be matched.
-     * @param geomTypes Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClasses Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Multi feature options.
      */
-    processPolygons(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClasses: OmvFilterString[],
-        matchLayer = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItems(this.m_polygonsToProcess, layer, geomType, featureClasses, matchLayer);
+    processPolygons(options: OmvFeatureFilterDescriptionBuilder.MultiFeatureOption) {
+        this.addItems(this.m_polygonsToProcess, options);
     }
 
     /**
      * Ignore a valid polygon feature.
      *
-     * @param layer Layer name to be matched
-     * @param geomType Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClass Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Feature options.
      */
-    ignorePolygon(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClass: string,
-        matchLayer = OmvFilterString.StringMatch.Match,
-        matchClass = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItem(
-            this.m_polygonsToIgnore,
-            layer,
-            geomType,
-            featureClass,
-            matchLayer,
-            matchClass
-        );
+    ignorePolygon(options: OmvFeatureFilterDescriptionBuilder.FeatureOption) {
+        this.addItem(this.m_polygonsToIgnore, options);
     }
 
     /**
      * Ignore polygon features.
      *
-     * @param layer Layer name to be matched.
-     * @param geomTypes Optional geometry type to be limited to. If specified, but does not match,
-     * the feature is ignored.
-     * @param featureClasses Optional class/classes to match. If specified, but does not match, the
-     * feature is ignored.
-     * @param matchLayer Match condition for the layer name.
-     * @param matchClass Match condition for `featureClass`.
+     * @param options Multi feature options.
      */
-    ignorePolygons(
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClasses: OmvFilterString[],
-        matchLayer = OmvFilterString.StringMatch.Match
-    ) {
-        this.addItems(this.m_polygonsToIgnore, layer, geomType, featureClasses, matchLayer);
+    ignorePolygons(options: OmvFeatureFilterDescriptionBuilder.MultiFeatureOption) {
+        this.addItems(this.m_polygonsToIgnore, options);
+    }
+
+    /**
+     * Add all the specified strings as "enabledKinds".
+     *
+     * @param {string[]} enabledKinds List of kinds that should be generated.
+     */
+    processKinds(enabledKinds: string[]) {
+        this.m_kindsToProcess = this.m_kindsToProcess.concat(enabledKinds);
+    }
+
+    /**
+     * Add all the specified strings as "disabledKinds".
+     *
+     * @param {string[]} disabledKinds List of kinds that should _not_ be generated.
+     */
+    ignoreKinds(disabledKinds: string[]) {
+        this.m_kindsToIgnore = this.m_kindsToIgnore.concat(disabledKinds);
     }
 
     /**
@@ -462,46 +352,50 @@ export class OmvFeatureFilterDescriptionBuilder {
             linesToProcess: this.m_linesToProcess,
             linesToIgnore: this.m_linesToIgnore,
             polygonsToProcess: this.m_polygonsToProcess,
-            polygonsToIgnore: this.m_polygonsToIgnore
+            polygonsToIgnore: this.m_polygonsToIgnore,
+
+            kindsToProcess: this.m_kindsToProcess,
+            kindsToIgnore: this.m_kindsToIgnore
         };
     }
 
     private addItem(
         items: OmvFilterDescription[],
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClass: string,
-        matchLayer?: OmvFilterString.StringMatch,
-        matchClass?: OmvFilterString.StringMatch,
-        minLevel?: number,
-        maxLevel?: number
+        options: OmvFeatureFilterDescriptionBuilder.FeatureOption
     ) {
-        if (minLevel === undefined || isNaN(minLevel)) {
-            minLevel = 0;
+        if (options.minLevel === undefined || isNaN(options.minLevel)) {
+            options.minLevel = 0;
         }
-        if (maxLevel === undefined || isNaN(maxLevel)) {
-            maxLevel = Infinity;
+        if (options.maxLevel === undefined || isNaN(options.maxLevel)) {
+            options.maxLevel = Infinity;
         }
 
         const item: OmvFilterDescription = {
             layerName: {
-                value: layer,
-                match: matchLayer === undefined ? OmvFilterString.StringMatch.Match : matchLayer
+                value: options.layer,
+                match:
+                    options.matchLayer === undefined
+                        ? OmvFilterString.StringMatch.Match
+                        : options.matchLayer
             },
             geometryTypes:
-                geomType !== undefined
-                    ? Array.isArray(geomType)
-                        ? geomType
-                        : [geomType]
+                options.geomType !== undefined
+                    ? Array.isArray(options.geomType)
+                        ? options.geomType
+                        : [options.geomType]
                     : undefined,
             classes: [
                 {
-                    value: featureClass,
-                    match: matchClass === undefined ? OmvFilterString.StringMatch.Match : matchClass
+                    value: options.featureClass,
+                    match:
+                        options.matchClass === undefined
+                            ? OmvFilterString.StringMatch.Match
+                            : options.matchClass
                 }
             ],
-            minLevel,
-            maxLevel
+            minLevel: options.minLevel,
+            maxLevel: options.maxLevel,
+            featureAttribute: options.featureAttribute
         };
 
         items.push(item);
@@ -509,34 +403,33 @@ export class OmvFeatureFilterDescriptionBuilder {
 
     private addItems(
         items: OmvFilterDescription[],
-        layer: string,
-        geomType: OmvGeometryType | OmvGeometryType[] | undefined,
-        featureClasses?: OmvFilterString[],
-        matchLayer?: OmvFilterString.StringMatch,
-        minLevel?: number,
-        maxLevel?: number
+        options: OmvFeatureFilterDescriptionBuilder.MultiFeatureOption
     ) {
-        if (minLevel === undefined || isNaN(minLevel)) {
-            minLevel = 0;
+        if (options.minLevel === undefined || isNaN(options.minLevel)) {
+            options.minLevel = 0;
         }
-        if (maxLevel === undefined || isNaN(maxLevel)) {
-            maxLevel = Infinity;
+        if (options.maxLevel === undefined || isNaN(options.maxLevel)) {
+            options.maxLevel = Infinity;
         }
 
         const item: OmvFilterDescription = {
             layerName: {
-                value: layer,
-                match: matchLayer === undefined ? OmvFilterString.StringMatch.Match : matchLayer
+                value: options.layer,
+                match:
+                    options.matchLayer === undefined
+                        ? OmvFilterString.StringMatch.Match
+                        : options.matchLayer
             },
             geometryTypes:
-                geomType !== undefined
-                    ? Array.isArray(geomType)
-                        ? geomType
-                        : [geomType]
+                options.geomTypes !== undefined
+                    ? Array.isArray(options.geomTypes)
+                        ? options.geomTypes
+                        : [options.geomTypes]
                     : undefined,
-            classes: featureClasses,
-            minLevel,
-            maxLevel
+            classes: options.featureClasses,
+            minLevel: options.minLevel,
+            maxLevel: options.maxLevel,
+            featureAttribute: options.featureAttribute
         };
 
         items.push(item);
@@ -604,6 +497,10 @@ export namespace OmvFeatureFilterDescriptionBuilder {
          * Maximum tile level to match.
          */
         maxLevel?: number;
+        /**
+         * Feature attribute to match.
+         */
+        featureAttribute?: OmvFilterFeatureAttribute;
     }
 
     /**
@@ -635,6 +532,10 @@ export namespace OmvFeatureFilterDescriptionBuilder {
          * Maximum tile level to match.
          */
         maxLevel?: number;
+        /**
+         * Feature attribute to match.
+         */
+        featureAttribute?: OmvFilterFeatureAttribute;
     }
 }
 
@@ -662,7 +563,21 @@ export class OmvGenericFeatureFilter implements OmvFeatureFilter {
         return false;
     }
 
-    constructor(private description: OmvFeatureFilterDescription) {}
+    private disabledKinds: GeometryKindSet | undefined;
+    private enabledKinds: GeometryKindSet | undefined;
+
+    constructor(private description: OmvFeatureFilterDescription) {
+        if (this.description.kindsToProcess.length > 0) {
+            this.enabledKinds = new GeometryKindSet(
+                this.description.kindsToProcess as GeometryKind[]
+            );
+        }
+        if (this.description.kindsToIgnore.length > 0) {
+            this.disabledKinds = new GeometryKindSet(
+                this.description.kindsToIgnore as GeometryKind[]
+            );
+        }
+    }
 
     wantsLayer(layer: string, level: number): boolean {
         if (OmvGenericFeatureFilter.matchLayer(layer, this.description.layersToProcess, level)) {
@@ -709,6 +624,26 @@ export class OmvGenericFeatureFilter implements OmvFeatureFilter {
         );
     }
 
+    wantsKind(kind: string | string[]): boolean {
+        // undefined -> no way to filter
+        if (kind === undefined) {
+            return true;
+        }
+
+        return (
+            !(
+                this.disabledKinds !== undefined &&
+                this.disabledKinds.hasOrIntersects(kind as GeometryKind)
+            ) ||
+            (this.enabledKinds !== undefined &&
+                this.enabledKinds.hasOrIntersects(kind as GeometryKind))
+        );
+    }
+
+    get hasKindFilter(): boolean {
+        return this.enabledKinds !== undefined || this.disabledKinds !== undefined;
+    }
+
     private wantsFeature(
         itemsToProcess: OmvFilterDescription[],
         itemsToIgnore: OmvFilterDescription[],
@@ -748,29 +683,85 @@ export class OmvGenericFeatureFilter implements OmvFeatureFilter {
 }
 
 /**
+ * An [[OmvFeatureFilter]] implementation that delegates all filter decision
+ * returning `true` for any predicate if all delegates return `true`.
+ */
+export class ComposedDataFilter implements OmvFeatureFilter {
+    constructor(readonly filters: OmvFeatureFilter[]) {}
+
+    get hasKindFilter() {
+        return this.filters.reduce<boolean>(
+            (result, filter) => result && filter.hasKindFilter,
+            true
+        );
+    }
+
+    wantsLayer(layer: string, level: number): boolean {
+        return this.filters.reduce<boolean>(
+            (result, filter) => result && filter.wantsLayer(layer, level),
+            true
+        );
+    }
+    wantsPointFeature(layer: string, geometryType: OmvGeometryType, level: number): boolean {
+        return this.filters.reduce<boolean>(
+            (result, filter) => result && filter.wantsPointFeature(layer, geometryType, level),
+            true
+        );
+    }
+    wantsLineFeature(layer: string, geometryType: OmvGeometryType, level: number): boolean {
+        return this.filters.reduce<boolean>(
+            (result, filter) => result && filter.wantsLineFeature(layer, geometryType, level),
+            true
+        );
+    }
+    wantsPolygonFeature(layer: string, geometryType: OmvGeometryType, level: number): boolean {
+        return this.filters.reduce<boolean>(
+            (result, filter) => result && filter.wantsPolygonFeature(layer, geometryType, level),
+            true
+        );
+    }
+    wantsKind(kind: string | string[]): boolean {
+        return this.filters.reduce<boolean>(
+            (result, filter) => result && filter.wantsKind(kind),
+            true
+        );
+    }
+}
+/**
  * `OmvFeatureModifier` implementation that uses a `OmvFeatureFilterDescription` to filter
  * `TileData` features before they are completely decoded.
  *
  * @hidden
  */
 export class OmvGenericFeatureModifier implements OmvFeatureModifier {
-    protected static matchItems(
+    static matchItems(
         layerName: string,
         featureClass: string,
         items: OmvFilterDescription[]
     ): boolean {
         for (const item of items) {
-            if (!OmvFilterString.matchString(layerName, item.layerName)) {
-                continue;
-            }
-
-            const matchClasses = item.classes;
-
-            if (featureClass !== undefined && matchClasses !== undefined) {
-                for (const matchClass of matchClasses) {
+            if (item.classes !== undefined) {
+                if (!OmvFilterString.matchString(layerName, item.layerName)) {
+                    continue;
+                }
+                for (const matchClass of item.classes) {
                     if (OmvFilterString.matchString(featureClass, matchClass)) {
                         return true;
                     }
+                }
+            }
+        }
+        return false;
+    }
+
+    static matchAttribute(layerName: string, env: MapEnv, items: OmvFilterDescription[]): boolean {
+        for (const item of items) {
+            if (item.featureAttribute !== undefined) {
+                if (
+                    OmvFilterString.matchString(layerName, item.layerName) &&
+                    env.lookup(item.featureAttribute.key) === item.featureAttribute.value
+                ) {
+                    return true;
                 }
             }
         }
@@ -816,14 +807,14 @@ export class OmvGenericFeatureModifier implements OmvFeatureModifier {
         env: MapEnv,
         defaultResult: boolean
     ): boolean {
-        if (layer === undefined || layer === undefined) {
+        if (layer === undefined || (itemsToProcess.length === 0 && itemsToIgnore.length === 0)) {
             return defaultResult;
         }
 
         let featureClass: string | undefined;
         const featureClassThing = env.lookup("class");
 
-        if (featureClassThing !== undefined) {
+        if (featureClassThing !== undefined && featureClassThing !== null) {
             featureClass = featureClassThing.toString();
         }
 
@@ -838,6 +829,14 @@ export class OmvGenericFeatureModifier implements OmvFeatureModifier {
             featureClass &&
             OmvGenericFeatureModifier.matchItems(layer, featureClass, itemsToIgnore)
         ) {
+            return false;
+        }
+
+        if (OmvGenericFeatureModifier.matchAttribute(layer, env, itemsToProcess)) {
+            return true;
+        }
+
+        if (OmvGenericFeatureModifier.matchAttribute(layer, env, itemsToIgnore)) {
             return false;
         }
 

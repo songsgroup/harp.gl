@@ -4,14 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { TileKey } from "@here/harp-geoutils";
-import { DataTexture } from "three";
+import { GeoBox, TileKey } from "@here/harp-geoutils";
 
 export interface DisplacementMap {
-    tileKey: TileKey;
+    xCountVertices: number;
+    yCountVertices: number;
+    buffer: Float32Array;
+}
 
-    /**
-     * We need DataTexture here to be able to access the raw data for CPU overlay.
-     */
-    texture: DataTexture;
+export interface TileDisplacementMap {
+    tileKey: TileKey;
+    texture: THREE.DataTexture;
+    displacementMap: DisplacementMap;
+    geoBox: GeoBox;
 }

@@ -9,11 +9,12 @@ import {
     IWorkerChannelMessage,
     LoggerManager,
     LogLevel,
-    MathUtils,
     WORKERCHANNEL_MSG_TYPE
 } from "@here/harp-utils";
 
 import { WorkerLoader } from "./workers/WorkerLoader";
+
+import * as THREE from "three";
 
 const logger = LoggerManager.instance.create("ConcurrentWorkerSet");
 
@@ -31,7 +32,7 @@ interface ReadyPromise {
 
 interface RequestEntry {
     promise: Promise<any>;
-    resolver: (error?: object, response?: object) => void;
+    resolver: (error?: Error, response?: object) => void;
 }
 
 export interface ConcurrentWorkerSetOptions {
@@ -46,7 +47,23 @@ export interface ConcurrentWorkerSetOptions {
      * Defaults to CLAMP(`navigator.hardwareConcurrency` - 1, 1, 4) or [[DEFAULT_WORKER_COUNT]].
      */
     workerCount?: number;
+
+    /**
+     * Timeout in milliseconds, in which each worker should set initial message.
+     *
+     * @default 10 seconds, see [[DEFAULT_WORKER_INITIALIZATION_TIMEOUT]]
+     */
+    workerConnectionTimeout?: number;
 }
+
+/**
+ * Interface for an item in the started worker list queue.
+ */
+interface WorkerEntry {
+    worker: Worker;
+    listener: EventListener;
+}
+
 /**
  * Interface for an item in the request queue. Stores the data to be decoded along with an
  * [[AbortController]].
@@ -60,7 +77,14 @@ interface WorkerRequestEntry {
 /**
  * The default number of Web Workers to use if `navigator.hardwareConcurrency` is unavailable.
  */
-const DEFAULT_WORKER_COUNT = 4;
+const DEFAULT_WORKER_COUNT = 2;
+
+/**
+ * The default timeout for first message from worker.
+ *
+ * @see [[WorkerLoader.startWorker]]
+ */
+export const DEFAULT_WORKER_INITIALIZATION_TIMEOUT = 10000;
 
 /**
  * A set of concurrent Web Workers. Acts as a Communication Peer for [[WorkerService]] instances
@@ -83,16 +107,15 @@ export class ConcurrentWorkerSet {
     private readonly m_eventListeners = new Map<string, (message: any) => void>();
     private m_workers = new Array<Worker>();
 
-    private m_workerListeners = new Array<EventListener>();
-
     // List of idle workers that can be given the next job. It is using a LIFO scheme to reduce
     // memory consumption in idle workers.
     private m_availableWorkers = new Array<Worker>();
-    private m_workerPromises = new Array<Promise<Worker>>();
+    private m_workerPromises = new Array<Promise<WorkerEntry | undefined>>();
+    private m_workerCount: number | undefined;
 
     private readonly m_readyPromises = new Map<string, ReadyPromise>();
     private readonly m_requests: Map<number, RequestEntry> = new Map();
-    private readonly m_workerRequestQueue: WorkerRequestEntry[] = [];
+    private m_workerRequestQueue: WorkerRequestEntry[] = [];
 
     private m_nextMessageId: number = 0;
     private m_stopped: boolean = true;
@@ -120,6 +143,9 @@ export class ConcurrentWorkerSet {
      */
     addReference() {
         this.m_referenceCount += 1;
+        if (this.m_referenceCount === 1 && this.m_stopped) {
+            this.start();
+        }
     }
 
     /**
@@ -155,36 +181,48 @@ export class ConcurrentWorkerSet {
             throw new Error("ConcurrentWorker set already started");
         }
 
-        const workerCount = getOptionValue(
+        this.m_workerCount = getOptionValue(
             this.m_options.workerCount,
             typeof navigator !== "undefined" && navigator.hardwareConcurrency !== undefined
                 ? // We need to have at least one worker
-                  MathUtils.clamp(navigator.hardwareConcurrency - 1, 1, 4)
+                  THREE.MathUtils.clamp(navigator.hardwareConcurrency - 1, 1, 2)
                 : undefined,
             DEFAULT_WORKER_COUNT
         );
 
         // Initialize the workers. The workers now have an ID to identify specific workers and
         // handle their busy state.
-        for (let workerId = 0; workerId < workerCount; ++workerId) {
-            const workerPromise = WorkerLoader.startWorker(this.m_options.scriptUrl);
-            workerPromise
-                .then(worker => {
+        const timeout = getOptionValue(
+            this.m_options.workerConnectionTimeout,
+            DEFAULT_WORKER_INITIALIZATION_TIMEOUT
+        );
+        for (let workerId = 0; workerId < this.m_workerCount; ++workerId) {
+            const workerPromise = WorkerLoader.startWorker(this.m_options.scriptUrl, timeout).then(
+                worker => {
                     const listener = (evt: Event): void => {
                         this.onWorkerMessage(workerId, evt as MessageEvent);
                     };
 
-                    this.m_workerListeners.push(listener);
                     worker.addEventListener("message", listener);
                     this.m_workers.push(worker);
                     this.m_availableWorkers.push(worker);
-                })
-                .catch(error => {
-                    logger.error(`failed to load worker ${workerId}: ${error}`);
-                });
+                    return {
+                        worker,
+                        listener
+                    };
+                }
+            );
             this.m_workerPromises.push(workerPromise);
         }
         this.m_stopped = false;
+    }
+
+    /**
+     * The number of workers started for this worker set. The value is `undefined` until the workers
+     * have been created.
+     */
+    get workerCount(): number | undefined {
+        return this.m_workerCount;
     }
 
     /**
@@ -219,6 +257,7 @@ export class ConcurrentWorkerSet {
             entry.resolver(new Error("worker destroyed"));
         });
         this.m_requests.clear();
+        this.m_workerRequestQueue = [];
 
         this.terminateWorkers();
 
@@ -233,11 +272,13 @@ export class ConcurrentWorkerSet {
      * it has started successfully. This method resolves when all workers in a set have
      * `service` initialized.
      *
+     * Promise is rejected if any of worker fails to start.
+     *
      * @param serviceId The service identifier.
      */
-    connect(serviceId: string): Promise<void> {
+    async connect(serviceId: string): Promise<void> {
         this.ensureStarted();
-
+        await Promise.all(this.m_workerPromises);
         return this.getReadyPromise(serviceId).promise as Promise<void>;
     }
 
@@ -286,11 +327,11 @@ export class ConcurrentWorkerSet {
         let resolver: ((error?: any, response?: any) => void) | undefined;
 
         const promise = new Promise<Res>((resolve, reject) => {
-            resolver = (error, response) => {
+            resolver = (error?: Error, response?: Res) => {
                 this.m_requests.delete(messageId);
 
                 if (error !== undefined) {
-                    reject(new Error(error.toString()));
+                    reject(error);
                 } else {
                     resolve(response as Res);
                 }
@@ -340,11 +381,11 @@ export class ConcurrentWorkerSet {
 
             let resolver: ((error?: any, response?: any) => void) | undefined;
             const promise = new Promise<Res>((resolve, reject) => {
-                resolver = (error, response) => {
+                resolver = (error: Error, response: Res) => {
                     this.m_requests.delete(messageId);
 
                     if (error !== undefined) {
-                        reject(new Error(error.toString()));
+                        reject(error);
                     } else {
                         resolve(response as Res);
                     }
@@ -453,7 +494,15 @@ export class ConcurrentWorkerSet {
             } else {
                 logger.error(`[${this.m_options.scriptUrl}]: onWorkerMessage: invalid workerId`);
             }
-            entry.resolver(response.error, response.response);
+            if (response.errorMessage !== undefined) {
+                const error = new Error(response.errorMessage);
+                if (response.errorStack !== undefined) {
+                    error.stack = response.errorStack;
+                }
+                entry.resolver(error);
+            } else {
+                entry.resolver(undefined, response.response);
+            }
         } else if (WorkerServiceProtocol.isInitializedMessage(event.data)) {
             const readyPromise = this.getReadyPromise(event.data.service);
             if (++readyPromise.count === this.m_workerPromises.length) {
@@ -508,7 +557,9 @@ export class ConcurrentWorkerSet {
         if (requestController !== undefined && requestController.signal.aborted) {
             const entry = this.m_requests.get(message.messageId);
             if (entry === undefined) {
-                logger.error(`[${this.m_options.scriptUrl}]: Bad RequesMessage: invalid messageId`);
+                logger.error(
+                    `[${this.m_options.scriptUrl}]: Bad RequestMessage: invalid messageId`
+                );
                 return;
             }
 
@@ -569,27 +620,15 @@ export class ConcurrentWorkerSet {
     private terminateWorkers() {
         // terminate all workers
         this.m_workerPromises.forEach(workerPromise => {
-            workerPromise
-                .then(worker => {
-                    const workerId = this.m_workers.indexOf(worker);
-                    if (workerId >= 0) {
-                        const listener = this.m_workerListeners[workerId];
-                        worker.removeEventListener("message", listener);
-                    } else {
-                        logger.error(
-                            // tslint:disable-next-line: max-line-length
-                            `[${this.m_options.scriptUrl}]: ConcurrentWorkerSet#terminateWorkers: invalid workerId`
-                        );
-                    }
-                    worker.terminate();
-                })
-                .catch(() => {
-                    // we ignore exception here, as it's already logged in #start and terminate is
-                    // noop if worker didn't start at all
-                });
+            workerPromise.then(workerEntry => {
+                if (workerEntry === undefined) {
+                    return;
+                }
+                workerEntry.worker.removeEventListener("message", workerEntry.listener);
+                workerEntry.worker.terminate();
+            });
         });
         this.m_workers = [];
-        this.m_workerListeners = [];
         this.m_workerPromises = [];
         this.m_availableWorkers = [];
         this.m_readyPromises.clear();
